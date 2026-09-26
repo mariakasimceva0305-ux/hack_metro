@@ -28,3 +28,4 @@ Ceiling analysis: a perfect daily level gives ≈0.92, an in-period oracle profi
 | 13 | p11 | v09 + December ordinary days ×1.03 | – | 0.89986 | −0.0017 | December level is right → bull hypothesis rejected |
 
 **Final submission: v08 (LB 0.90167)** → `submissions/FINAL_SUBMISSION.csv`.
+| 14 | traffic source | ЦОДД congestion score (Deptrans channel) vs residuals | OOS +0.0002…+0.0004 | – | – | confirmed small effect (+2 % on 7+ days); documented as 4th external source |

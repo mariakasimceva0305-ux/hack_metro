@@ -9,8 +9,7 @@ import json, re, html, time, os, urllib.request
 
 CH = "DtOperativno"
 OUT = os.path.join(os.path.dirname(__file__), "dtop_messages.jsonl")
-START_BEFORE = 26500     # somewhere in early 2026
-STOP_DATE = "2024-12-25"  # stop when older than this
+# message ids 19800..24520 cover 2024-12-23 .. 2026-01-09 (found by probing ?before=N)
 
 
 def fetch(before):
@@ -38,28 +37,19 @@ def parse(s):
 
 
 def main():
+    from concurrent.futures import ThreadPoolExecutor
+    befores = list(range(19800, 24520, 20))
     seen = {}
-    if os.path.exists(OUT):
-        for line in open(OUT, encoding="utf-8"):
-            r = json.loads(line); seen[r["id"]] = r
-    before = min(seen) if seen else START_BEFORE
-    with open(OUT, "a", encoding="utf-8") as f:
-        while True:
-            msgs = parse(fetch(before))
-            if not msgs:
-                before -= 20
-                continue
-            for r in msgs:
-                if r["id"] not in seen:
-                    seen[r["id"]] = r
-                    f.write(json.dumps(r, ensure_ascii=False) + "\n")
-            mn = min(r["id"] for r in msgs)
-            oldest = min(msgs, key=lambda r: r["id"])["dt"]
-            print(before, mn, oldest, flush=True)
-            if oldest[:10] < STOP_DATE:
-                break
-            before = mn
-            time.sleep(0.3)
+    with ThreadPoolExecutor(8) as ex:
+        for i, page in enumerate(ex.map(lambda b: parse(fetch(b)), befores)):
+            for r in page:
+                seen[r["id"]] = r
+            if i % 20 == 0:
+                print(i, len(befores), len(seen), flush=True)
+    with open(OUT, "w", encoding="utf-8") as f:
+        for k in sorted(seen):
+            f.write(json.dumps(seen[k], ensure_ascii=False) + "\n")
+    ids = sorted(seen); print("msgs", len(ids), "id range", ids[0], ids[-1], "missing ids", ids[-1] - ids[0] + 1 - len(ids))
 
 
 if __name__ == "__main__":
