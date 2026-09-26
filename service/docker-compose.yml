@@ -1,0 +1,20 @@
+services:
+  tram-forecast:
+    build: .
+    image: tram-forecast:latest
+    container_name: tram-forecast
+    ports:
+      - "8000:8000"
+    environment:
+      WORKERS: "2"   # 1 worker per vCPU: measured best p95 under the 2-CPU limit
+      # Swap the forecast without rebuilding: mount a file and point FORECAST_PATH at it, e.g.
+      # FORECAST_PATH: /srv/forecast/v02.csv
+      # EXPLAIN_PATH: /srv/forecast/v02_explain.csv
+    # volumes:
+    #   - ../submissions:/srv/forecast:ro
+    deploy:
+      resources:
+        limits:
+          cpus: "2"
+          memory: 2g
+    restart: unless-stopped
