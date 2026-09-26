@@ -23,3 +23,8 @@ Rule: one change per leaderboard submission, so every LB delta is attributable.
 | 10 | leak hunt | GT = shifted history? (10 shifts vs 9 LB points), hidden rows, begin/input dates, directory | – | – | – | no leak: GT is real Nov–Dec data |
 
 Ceiling analysis: a perfect daily level gives ≈0.92, an in-period oracle profile ≈0.93–0.94 → remaining error is hourly noise.
+| 11 | v09 | v08 + weather multiplier | OOS +0.0004…+0.003 | 0.90154 | −0.0001 | neutral on LB; kept in the service as a coefficient |
+| 12 | p10 | v09 + November ordinary days ×1.03 | – | 0.90086 | −0.0007 | November level is right |
+| 13 | p11 | v09 + December ordinary days ×1.03 | – | 0.89986 | −0.0017 | December level is right → bull hypothesis rejected |
+
+**Final submission: v08 (LB 0.90167)** → `submissions/FINAL_SUBMISSION.csv`.
