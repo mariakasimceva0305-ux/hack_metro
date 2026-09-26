@@ -17,6 +17,12 @@ def wait_ready(page):
     page.wait_for_timeout(2500)  # tiles + chart animations
 
 
+def panel(page, sel, name):
+    """Element screenshot without the sticky filter bar covering the top of the element."""
+    page.add_style_tag(content=".filters{position:static !important} .asst-btn{display:none !important}")
+    page.locator(sel).screenshot(path=str(OUT / name))
+
+
 with sync_playwright() as p:
     b = p.chromium.launch(channel="chrome", headless=True)
     for theme in ("light", "dark"):
@@ -71,6 +77,33 @@ with sync_playwright() as p:
         page.click("#horizon button[data-h=day]")
         wait_ready(page)
         page.screenshot(path=str(OUT / "day_route17_nogeo.png"), full_page=False)
+        # AI / ML layer: 80 % interval, overflow probability, P90 planning, anomalies, model, assistant
+        panel(page, "#lineChart", "ai_interval_day.png")
+        panel(page, "#kpis", "ai_kpi_overflow.png")
+        page.check("#fP90", force=True)
+        wait_ready(page)
+        panel(page, "#fleetCard", "ai_fleet_p90.png")
+        page.uncheck("#fP90", force=True)
+        page.select_option("#route", "12")  # April: 1–4 Apr drop found by the detector (likely diversion)
+        page.click("#horizon button[data-h=month]")
+        page.select_option("#month", "2025-04")
+        wait_ready(page)
+        panel(page, "#lineChart", "ai_anomalies_month.png")
+        panel(page, "#anomCard", "ai_anomalies_panel.png")
+        page.select_option("#month", "2025-12")
+        if page.is_visible("#modelSeg button[data-m=hybrid]"):
+            page.click("#modelSeg button[data-m=hybrid]")
+        wait_ready(page)
+        panel(page, "#lineChart", "ai_interval_month_hybrid.png")
+        panel(page, "#modelCard", "ai_model_panel.png")
+        page.eval_on_selector("#asstBtn", "b => b.click()")  # the floating button is hidden for panel shots
+        for q in ("Где завтра переполнение?", "Сколько вагонов нужно на 17 маршруте в 8 утра?"):
+            page.fill("#asstQ", q)
+            page.press("#asstQ", "Enter")
+            page.wait_for_timeout(900)
+        page.locator("#asst").screenshot(path=str(OUT / "ai_assistant.png"))
+        page.click("#asstClose")
+        page.click("#horizon button[data-h=day]")
         mob = b.new_context(viewport={"width": 390, "height": 844}, device_scale_factor=1)
         mp = mob.new_page()
         mp.goto(BASE + "/", wait_until="domcontentloaded")

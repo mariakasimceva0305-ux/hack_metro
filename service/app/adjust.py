@@ -41,6 +41,7 @@ class Adj:
     w_floor: float = DEF_FLOOR
     w_scn: tuple = ()          # ((date, add_mm, temp | None), ...)
     events: tuple = ()         # ((route | "*", d0, d1, k, h0, h1), ...)
+    model: str = "v08"         # forecast source: "v08" (structural) or "hybrid" (structural × LightGBM ratio)
 
     @property
     def weather_changed(self) -> bool:
@@ -49,6 +50,11 @@ class Adj:
     @property
     def active(self) -> bool:
         return bool(self.level) or self.special != 1.0 or self.weather_changed or bool(self.events)
+
+    @property
+    def base(self) -> "Adj":
+        """The same forecast model without corrections (the «было» side of «было → стало»)."""
+        return NO_ADJ if self.model == "v08" else Adj(model=self.model)
 
     def describe(self) -> list[str]:
         out = []
@@ -85,7 +91,10 @@ def _d(x: str, what: str) -> date:
 
 
 def parse(st, k_level: str | None, k_special: float, w_precip: float, w_cold: float, w_floor: float,
-          w_scenario: str | None, k_event: str | None) -> Adj:
+          w_scenario: str | None, k_event: str | None, model: str = "v08") -> Adj:
+    if model == "hybrid" and "forecast_hybrid" not in st.cubes:
+        raise ApiError(400, "model_unavailable",
+                       "Гибридная модель ML не загружена (нет файла hybrid_nov_dec.csv): используйте model=v08")
     level = []
     for item in filter(None, (x.strip() for x in (k_level or "").split(","))):
         if ":" in item:
@@ -137,7 +146,7 @@ def parse(st, k_level: str | None, k_special: float, w_precip: float, w_cold: fl
                 raise ApiError(400, "invalid_adjustment", "k_event: часы от 0 до 23, начало не позже конца")
         events.append((r, d0, d1, k, h0, h1))
     return Adj(tuple(level), round(k_special, 4), round(w_precip, 5), round(w_cold, 5), round(w_floor, 4),
-               tuple(scn), tuple(events))
+               tuple(scn), tuple(events), model)
 
 
 def weather_mult(st, adj: Adj, di: np.ndarray) -> np.ndarray | None:

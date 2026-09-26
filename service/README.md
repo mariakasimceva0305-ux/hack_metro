@@ -5,6 +5,7 @@ A web service and dashboard for Moscow dispatchers. It shows the forecast of tra
 Stack: FastAPI with in-memory numpy cubes, plus one static page (Leaflet + ECharts) served by the same process, in one container (2 vCPU / 2 GB).
 
 - Dashboard: `http://localhost:8000/`. Swagger / OpenAPI: `http://localhost:8000/docs`
+- **AI/ML layer** (section «ИИ/ML-компоненты» below): 80 % prediction intervals and overflow probability, P90 fleet planning, an AI anomaly detector over the history, the «Модель» panel with fold metrics and a v08 ↔ hybrid toggle, and a rule-based «Помощник диспетчера».
 - Data: actuals Jan–Oct 2025 (`labels_day_*`); forecast Nov–Dec 2025 `submissions/final_candidate.csv` (v08, public LB 0.90167) with its decomposition `final_candidate_explain.csv` (`base × special_mult × weather_mult × rules_mult`); daily Moscow weather `research/weather_moscow_2025.csv`
 
 ![dashboard with corrections](docs/screenshots/corrections_route17.png)
@@ -13,7 +14,8 @@ Stack: FastAPI with in-memory numpy cubes, plus one static page (Leaflet + EChar
 
 ```bash
 # 1) (optional) rebuild the data bundle from the workspace; service/data/ is committed and self-contained
-python scripts/prepare_data.py            # ../submissions/final_candidate.csv + _explain.csv, weather, stops, fleet
+python scripts/prepare_data.py            # ../submissions/final_candidate.csv + _explain.csv, weather, stops, fleet,
+                                          # + ML layer from ../experiments/ml (intervals, anomalies, hybrid, REPORT.md)
 
 # 2) Docker: 2 vCPU / 2 GB limits are set in docker-compose.yml
 docker compose up --build                 # -> http://localhost:8000
@@ -28,10 +30,11 @@ uvicorn app.main:app --port 8000 --workers 2
 | `FORECAST_PATH` | `data/forecast.csv` | forecast `route;date;hour;prediction` |
 | `EXPLAIN_PATH` | `data/explain.csv` | decomposition `route;date;hour;base;special_mult;weather_mult;rules_mult;prediction;note`. Optional: without it, the explain panel is hidden and the special/weather corrections have nothing to rescale |
 | `HISTORY_PATH`, `STOPS_PATH`, `ROUTE_NAMES_PATH`, `PIPELINE_REPORT_PATH`, `DATA_DIR` | `data/…` | actuals, stops, names, data-quality report, bundle folder (`weather_daily.csv`, `fleet.json`) |
+| `INTERVALS_PATH`, `ANOMALIES_PATH`, `HYBRID_PATH`, `HYBRID_FOLDS_PATH`, `MODEL_REPORT_PATH` | `data/intervals.csv`, `data/anomalies.csv`, `data/hybrid_nov_dec.csv`, `data/hybrid_folds.csv`, `data/model_report.md` | optional ML layer. Every file may be missing: the related feature reports «not available» and the service keeps working on v08 |
 | `WORKERS` | `2` | uvicorn workers (1 per vCPU gave the best p95) |
 | `TRACKED_ROUTES` | `1,5,7,11,12,17,25,26,28,50` | the 10 target routes. Directory-only routes (2, 3, 4, 6, 10) are hidden everywhere |
 
-Tests: `pip install -r requirements-dev.txt && pytest -q` → **31 passed**. They cover valid requests, corrections, rolling stock, the year scenario, export, and 4xx errors with Russian messages.
+Tests: `pip install -r requirements-dev.txt && pytest -q` → **47 passed**. They cover valid requests, corrections, rolling stock, the year scenario, export, and 4xx errors with Russian messages. `tests/test_ml.py` (16 tests) checks the AI/ML layer on small synthetic fixtures (intervals, hybrid, anomalies, report), so it does not depend on the real ML files. It also checks that every feature degrades cleanly when the files are absent.
 
 ## Architecture
 
@@ -43,17 +46,21 @@ flowchart LR
     F["Forecast / aggregation<br/>src/model_ls.py (level × shape)<br/>src/make_final.py → final_candidate.csv + _explain.csv"]
     I --> G --> F
   end
+  subgraph ML["ML layer (hach_metro/src/ml → experiments/ml)"]
+    Q["intervals.csv (P10/P50/P90)<br/>anomalies.csv (IsolationForest + z)<br/>hybrid_nov_dec.csv (base × LightGBM)<br/>REPORT.md"]
+  end
   subgraph B["Bundle (service/scripts/prepare_data.py)"]
-    D["data/: history, forecast, explain,<br/>stops.json, weather_daily.csv, fleet.json,<br/>pipeline_report.json"]
+    D["data/: history, forecast, explain,<br/>stops.json, weather_daily.csv, fleet.json,<br/>pipeline_report.json, ML files (optional)"]
   end
   subgraph C["Container: 2 vCPU / 2 GB"]
-    A["API: service/app<br/>FastAPI /api/v1 · uvicorn ×2<br/>queries.py · adjust.py (coefficients)<br/>fleet (rolling stock) · lru-cache of JSON bytes"]
+    A["API: service/app<br/>FastAPI /api/v1 · uvicorn ×2<br/>queries.py · adjust.py (coefficients)<br/>fleet (rolling stock) · ml.py (intervals, anomalies)<br/>assistant.py (rules) · lru-cache of JSON bytes"]
     M[("in-memory float32 cubes<br/>route × day × hour:<br/>history / forecast / combined<br/>+ base / special / weather / rules")]
     W["Frontend: service/static<br/>index.html + app.js + style.css<br/>Leaflet map, ECharts"]
     A --> M
     A --> W
   end
   F --> D --> A
+  F --> Q --> D
   U["Dispatcher's browser"] -->|REST JSON / CSV / XLSX| A
 ```
 
@@ -69,19 +76,22 @@ Errors always have the same shape: `{"error": {"code", "message", "details"}}`, 
 |---|---|---|
 | `GET /routes` | — | the 10 target routes, names, `has_history`, `has_geometry`, `launch_date` (route 5 = 2025-12-16), coverage |
 | `GET /stops` | `route` | stops with coordinates, direction, share of route boardings; polylines |
-| `GET /forecast` | `route` (`7`, `7,11`, `all`), `date_from`, `date_to`, `hour_from`, `hour_to`, `granularity=hour\|day\|month`, **+ corrections** | series + summary. With corrections: `adjusted`, `delta` (было → стало), `baseline.values` |
+| `GET /forecast` | `route` (`7`, `7,11`, `all`), `date_from`, `date_to`, `hour_from`, `hour_to`, `granularity=hour\|day\|month`, `model=v08\|hybrid`, **+ corrections** | series + summary. With corrections: `adjusted`, `delta` (было → стало), `baseline.values`. With intervals loaded: `p10`, `p90` on every point + `interval` (level 0.8, method) |
 | `GET /history` | same (no corrections: actuals are never modified) | actuals Jan–Oct 2025 |
-| `GET /series` | `source=history\|forecast\|combined` + the above | one series |
+| `GET /series` | `source=history\|forecast\|combined` + the above | one series (`p10`/`p90` on forecast days) |
 | `GET /forecast/stop` | `stop_id` + period + corrections | stop-level estimate |
 | `GET /map` | `route`, `date`, `source` + corrections | every stop × 24 hourly values (the dashboard animates hours on the client) |
 | `GET /kpi` | period + `source` + corrections | peak hour, max hourly load, total, change vs previous month (a single day is compared with the same weekday), `delta` |
-| `GET /fleet` | `route`, `date`, `capacity`, `load_target` (0.8), `peak_share` (0.6), `turnover` (1.5), `speed` (17.2 km/h), `layover` (10), `max_headway` (20), `plan`, `min_boardings` (30) + corrections | trams needed per hour vs current supply, risk / surplus status, recommendations |
+| `GET /fleet` | `route`, `date`, `capacity`, `load_target` (0.8), `peak_share` (0.6), `turnover` (1.5), `speed` (17.2 km/h), `layover` (10), `max_headway` (20), `plan`, `min_boardings` (30), **`plan_by=p50\|p90`** + corrections | trams needed per hour vs current supply, risk / surplus status, recommendations. With intervals: per hour `p_overflow`, `boardings_p10/p90`; top-level `overflow` {max, route, hour} |
 | `GET /scenario/year` | `route`, `growth` (%), `band` (±%, 10) + corrections | **scenario forecast** Jan–Dec 2026 by month with low/high |
 | `GET /weather` | `date_from`, `date_to` + weather corrections | precipitation, temperature, weather multiplier (model vs corrected) |
 | `GET /explain` | `route`, `date` | per hour: base, special/weather/rules multipliers, prediction, note |
 | `GET /export` | `format=csv\|xlsx`, `source=forecast\|history\|combined\|scenario`, period, granularity + corrections | file. With corrections it gets two columns, «с коррекцией» and «Прогноз модели». The XLSX has a «Параметры» sheet listing the applied coefficients |
 | `GET /pipeline/report` | — | data-quality report |
-| `GET /health`, `GET /metrics` | — | readiness, data bundle; per-worker counters, latency histogram, cache hits |
+| `GET /anomalies` | `route`, `date_from`, `date_to`, `kind=drop\|spike\|shape` | AI anomaly detector events: date, kind (провал / всплеск / аномальный профиль), Russian cause label, score, actual vs typical day, deviation %; `by_kind`, `training_note`. `available: false` without `anomalies.csv` |
+| `GET /model` | — | «Модель» panel: description, REPORT.md tables (fold metrics, intervals, detector, decisions), external sources with links, explain factors, hybrid vs v08 totals, availability flags |
+| `GET /assistant` | `q` (≤ 300 chars), `ref_date` («сегодня»), `plan_by` + corrections, `model` | «Помощник диспетчера»: parsed route / date / hour, intent, answer text, items, a dashboard `action` |
+| `GET /health`, `GET /metrics` | — | readiness, data bundle, `ml` flags (intervals / hybrid / anomalies / report, load errors); per-worker counters, latency histogram, cache hits |
 
 ### Correction coefficients (criterion 2c): also API parameters
 
@@ -140,6 +150,35 @@ All screenshots are in `docs/screenshots/`. To regenerate them: `python scripts/
 - **Year = scenario, not the model.** The seasonal index of month *m* is the average day of *m* in 2025 (Jan–Oct actual, Nov–Dec the model forecast, corrections included) divided by the 2025 level. The 2026 forecast = level × index × (1 + growth) × days in the month. The band is ±10 % by default, which is about 1 − the model's LB score (0.90). Route 5 has no history, so it uses the network index and its own post-launch level.
 - **Stop-level numbers are an estimate**: route forecast × stop share. The pipeline gives each stop an equal weight; transfer hubs get ×2 and the last stop of a direction ×0.1.
 
+## ИИ/ML-компоненты
+
+The ML layer comes from `src/ml/` (ML engineer, report in `experiments/ml/REPORT.md` → `data/model_report.md`). The service reads it as optional files. Everything here is computed in-process from the bundle: no external LLM or API calls, no keys.
+
+| Component | Where | How it works | Status of the ML run |
+|---|---|---|---|
+| **80 % interval** «80 % интервал» | day and month charts (shaded band), `/forecast`, `/series`, `/forecast/stop`, export (P10/P90 columns) | The interval is stored relative to the ML median (P10/P50, P90/P50), so the band follows whatever is shown: v08, hybrid, or a corrected forecast. Hours of one day and routes are summed as fully correlated. Days of a month are combined as independent (root of sum of squares): an hourly ±30 % does not turn into a ±30 % month | shipped: conformal quantiles ×1.15, coverage 78 % (82 % passenger-weighted) on 5 folds |
+| **Вероятность переполнения** | 5th KPI tile, orange line in the fleet chart, `p_overflow` in `/fleet`, recommendation texts | P(boardings in the hour > what the current supply carries at 100 % of vehicle capacity). The capacity comes from the fleet panel (vehicle, turnover, peak share, trips per vehicle). A two-piece lognormal per cell is fitted through P10/P50/P90: σ_low = ln(P50/P10)/1.2816 and σ_high = ln(P90/P50)/1.2816, with the median = the shown forecast. If P10 = 0, the other side's σ is used | same method as `prob_exceed` in the ML report |
+| **Планировать по P90** | switch in «Выпуск подвижного состава», `plan_by=p90` | The requirement is computed from P90 demand instead of the median, which leaves a buffer for the upper edge of the forecast | — |
+| **ИИ-детектор аномалий** | panel «ИИ-детектор аномалий», red/amber dots on the «Месяц» history chart with a tooltip, `/anomalies` | Unsupervised (IsolationForest plus robust z-scores of level, route share and hourly profile) → drop / spike / shape with a cause. English labels are translated to Russian (the original is kept in `label_src`). The service adds actual vs typical day (median of the same weekday ±4 weeks). «Исключить аномалии из обучения» is informational: history is already cleaned (manual plus auto-clean with a regime guard) | 262 of 2,736 route-days flagged, 87 % explained by known causes. Monitoring tool, v08 unchanged |
+| **Модель** | card «Модель» + filter «Модель: v08 / Гибрид ML» | Structural v08 (base × special × weather × rules) and the hybrid base × (1 − w + w·r̂) with LightGBM r̂. REPORT.md tables are rendered: fold metrics, interval methods, detector recall, auto-clean, decisions. External sources with links: Open-Meteo weather, production calendar, Дептранс closures/events, ЦОДД road load («Дептранс. Оперативно»). Explain factors including `ml_ratio`. The toggle switches every chart, KPI, fleet and export to `hybrid_nov_dec.csv` (`model=hybrid`) | LightGBM did not beat the base on the folds (−0.019), so **w = 0**. The hybrid series is the structural base, and the UI says so |
+| **Помощник диспетчера** | floating button, `/assistant` | Regex parsing of route (№ 17 / 17 маршрут), date (сегодня / завтра / weekday / «10 декабря» / 10.12 / ISO; «сегодня» = the date selected on the dashboard), hour («в 8 утра», «в 7 вечера», 18:00) and intent (переполнение, вагоны, пассажиры, час пик, аномалии, модель). It then calls the same query functions as the API. The «Показать на дашборде» button applies route, date and hour | rule-based, no LLM |
+
+![interval](docs/screenshots/ai_interval_day.png)
+![overflow KPI](docs/screenshots/ai_kpi_overflow.png)
+![fleet by P90](docs/screenshots/ai_fleet_p90.png)
+![anomalies on the month chart](docs/screenshots/ai_anomalies_month.png)
+![anomaly panel](docs/screenshots/ai_anomalies_panel.png)
+![model panel](docs/screenshots/ai_model_panel.png)
+![assistant](docs/screenshots/ai_assistant.png)
+
+```bash
+curl "localhost:8000/api/v1/forecast?route=17&date_from=2025-12-10&date_to=2025-12-10&hour_from=8&hour_to=8"
+# "points":[{"ts":"2025-12-10T08:00","value":5444.0,"p10":...,"p90":...}], "interval":{"level":0.8,...}
+curl "localhost:8000/api/v1/fleet?route=all&date=2025-12-10&plan_by=p90"      # "overflow":{"max":...,"route":"11","hour":16}
+curl "localhost:8000/api/v1/anomalies?route=12&date_from=2025-04-01&date_to=2025-04-30"
+curl "localhost:8000/api/v1/assistant?q=сколько вагонов нужно на 17 маршруте в 8 утра&ref_date=2025-12-10"
+```
+
 ## Performance (measured)
 
 **Measured on the host, not in Docker.** On the development machine Docker Desktop 4.60 crashes at startup, so the Docker engine never comes up: `initializing Inference manager: remove …\Docker\run\dockerInference: The file cannot be accessed by the system` (a stale socket file under a user profile with a Cyrillic path). I measured the same service with the same limit instead: uvicorn with 2 workers, with the whole process tree **pinned to 2 logical CPUs** (affinity 0x3, the same CPU budget as `cpus: 2`). CPU is sampled from process CPU time (200 % = both cores busy) and RAM is the working set of the tree. Host: Intel Core Ultra 5 225H (14 logical CPUs), 32 GB, Windows 11, Python 3.12. The load generator runs on the remaining cores.
@@ -155,7 +194,17 @@ Load: `scripts/loadtest.py`, closed loop, aiohttp, 30 s per run, a dashboard-lik
 | 2 CPU, 64 conn | 2 | 64 | **2 532** | 24.4 | **37.2** | 64.0 | 150 / 200 | 376 MB | 0 |
 | 2 CPU, 256 conn | 2 | 256 | **1 986** | 82.1 | **274.3** | 447.0 | 137 / 198 | 484 MB | 0 |
 
-Raw results are in `docs/loadtest_r2_*.json` and `docs/sample_r2_*.json`. The CPU average includes the idle warm-up and cool-down seconds; while the load runs, CPU is at 185–200 %.
+Round 3 (AI/ML layer on: interval bands in `/forecast`, overflow probability in `/fleet`, same request mix), 2 CPUs pinned, 2 workers:
+
+| Run | Connections | RPS | p50 ms | p95 ms | p99 ms | RAM max |
+|---|---|---|---|---|---|---|
+| r3, ML layer **off** (same session, A/B) | 64 | 2 426 | 22.6 | 61.8 | 89.0 | 382 MB |
+| r3, ML layer **on** | 64 | 2 327 | 23.6 | 64.1 | 92.7 | 411 MB |
+| r3, ML layer on | 16 | 2 300 | 5.7 | 16.6 | 24.3 | 373 MB |
+
+The ML layer costs about 4 % at p95 in the same-session A/B (61.8 → 64.1 ms) and +29 MB RAM. In-process cost per request changes by less than 0.1 ms. The whole host was busier than in round 2: OneDrive was syncing and the ML jobs were running, and the no-ML baseline itself went from 37 to 62 ms at 64 connections. The absolute p95 values of round 3 are therefore not comparable with round 2; the A/B row is the fair comparison.
+
+Raw results are in `docs/loadtest_r2_*.json`, `docs/loadtest_r3_*.json` and the matching `docs/sample_*.json`. The CPU average includes the idle warm-up and cool-down seconds; while the load runs, CPU is at 185–200 %.
 
 Against the requirement (hundreds of RPS, p95 < 200–300 ms, 2–4 vCPU / 2–4 GB):
 - About **2.5–2.7k RPS** on 2 CPUs.
@@ -177,12 +226,14 @@ To fix Docker Desktop on the dev machine: quit it, delete `%LOCALAPPDATA%\Docker
 
 ```
 service/
-  app/      main.py (routes, params), queries.py (series, KPI, map, fleet, year), adjust.py (correction coefficients),
-            store.py (loading, cubes), errors.py (Russian JSON errors), metrics.py, config.py
+  app/      main.py (routes, params), queries.py (series, KPI, map, fleet, year, anomalies, model), adjust.py (correction
+            coefficients, model choice), ml.py (optional ML layer: intervals, anomalies, hybrid, report parsing, lognormal),
+            assistant.py (rule-based «Помощник диспетчера»), store.py (loading, cubes), errors.py, metrics.py, config.py
   static/   index.html, app.js, style.css (no build step; Leaflet/ECharts from jsDelivr)
-  data/     bundle: history, forecast (v08), explain, stops, weather_daily, fleet, pipeline report, meta
+  data/     bundle: history, forecast (v08), explain, stops, weather_daily, fleet, pipeline report, meta,
+            ML layer: intervals.csv, anomalies.csv, hybrid_nov_dec.csv, hybrid_folds.csv, model_report.md
   scripts/  prepare_data.py, loadtest.py, bench_docker.ps1, bench_windows.ps1, screenshots.py
-  tests/    pytest API tests (31)
+  tests/    pytest API tests (31) + AI/ML layer tests on synthetic fixtures (16)
   docs/     screenshots, raw load-test JSON
 ```
 
@@ -192,3 +243,5 @@ service/
 - Stop-level values and the current tram supply are estimates: the data has no stop-level counts and no hourly depot orders.
 - The map tiles and chart libraries are loaded from the internet (OSM, jsDelivr).
 - `/metrics` counters are per worker process.
+- `hybrid_nov_dec.csv` has `prediction = base = v08` (w = 0 chosen by cross-validation); the «Гибрид ML» toggle therefore shows the same numbers as v08, with `ml_ratio` as an explanatory column.
+- «Помощник диспетчера» understands only structured questions (route / date / hour / one of six intents). Anything else gets the help text with examples.

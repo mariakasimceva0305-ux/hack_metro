@@ -22,6 +22,8 @@
     </div>
   </div>
   <nav class="links">
+    <a href="#modelCard">Модель</a>
+    <a href="#anomCard">ИИ-аномалии</a>
     <a href="/docs" target="_blank" rel="noopener">API · Swagger</a>
     <button id="themeBtn" class="ghost" title="Переключить тему">◐</button>
   </nav>
@@ -56,6 +58,13 @@
     <span>Коридор ±, %</span>
     <input type="number" id="band" value="10" min="0" max="50" step="1">
   </label>
+  <div class="f hidden" id="modelBox">
+    <span>Модель</span>
+    <div class="seg" id="modelSeg" role="tablist" title="Переключить прогноз: структурная модель v08 или гибрид с LightGBM">
+      <button data-m="v08" class="on">v08</button>
+      <button data-m="hybrid">Гибрид ML</button>
+    </div>
+  </div>
   <div class="f">
     <span>Часы</span>
     <div class="hours">
@@ -73,11 +82,26 @@
 
 <div id="toast" class="toast hidden" role="alert"></div>
 
+<button id="asstBtn" class="asst-btn" aria-expanded="false" aria-controls="asst">Помощник диспетчера</button>
+<section id="asst" class="asst hidden" aria-label="Помощник диспетчера">
+  <div class="asst-h">
+    <div><b>Помощник диспетчера</b><div class="muted" id="asstRef"></div></div>
+    <button class="ghost" id="asstClose" aria-label="Закрыть">✕</button>
+  </div>
+  <div class="asst-log" id="asstLog" aria-live="polite"></div>
+  <div class="chips asst-ex" id="asstEx"></div>
+  <form class="asst-form" id="asstForm">
+    <input type="text" id="asstQ" maxlength="300" placeholder="Например: сколько вагонов нужно на 17 маршруте в 8 утра?" autocomplete="off">
+    <button class="btn" type="submit">Спросить</button>
+  </form>
+</section>
+
 <section class="kpis" id="kpis">
   <div class="kpi"><div class="k-label">Пиковый час</div><div class="k-val" id="kPeak">—</div><div class="k-sub" id="kPeakSub"></div></div>
   <div class="kpi"><div class="k-label">Макс. загрузка за час</div><div class="k-val" id="kMax">—</div><div class="k-sub" id="kMaxSub"></div></div>
   <div class="kpi"><div class="k-label" id="kTotalLabel">Пассажиров за период</div><div class="k-val" id="kTotal">—</div><div class="k-sub" id="kTotalSub"></div></div>
   <div class="kpi"><div class="k-label">Изменение к прошлому месяцу</div><div class="k-val" id="kChange">—</div><div class="k-sub" id="kChangeSub"></div></div>
+  <div class="kpi" id="kOverBox" title="P(пассажиров за час больше вместимости текущего выпуска) по интервалам прогноза P10–P90"><div class="k-label" id="kOverLabel">Вероятность переполнения</div><div class="k-val" id="kOver">—</div><div class="k-sub" id="kOverSub"></div></div>
 </section>
 
 <section class="adj card" id="adjCard" aria-label="Корректирующие коэффициенты">
@@ -186,6 +210,8 @@
       <label class="f"><span>Скорость, км/ч</span><input type="number" id="fSpeed" placeholder="17,2" min="5" max="40" step="0.5"></label>
       <label class="f"><span>Отстой, мин</span><input type="number" id="fLay" value="10" min="0" max="60" step="1"></label>
       <label class="f"><span>Макс. интервал, мин</span><input type="number" id="fHead" value="20" min="3" max="60" step="1"></label>
+      <label class="f switch" id="fP90Box" title="Считать потребность по верхней границе 80 % интервала (P90), а не по медиане">
+        <span>Запас</span><span class="sw"><input type="checkbox" id="fP90"><i></i><b>Планировать по P90</b></span></label>
     </div>
     <div class="fleet-grid">
       <div id="fleetChart" class="chart"></div>
@@ -195,6 +221,54 @@
       </div>
     </div>
     <p class="hint" id="fleetHint"></p>
+  </section>
+
+  <section class="card wide" id="anomCard">
+    <div class="card-h">
+      <h2>ИИ-детектор аномалий</h2>
+      <span class="badge" id="anomBadge">история январь–октябрь 2025</span>
+    </div>
+    <div class="anom-top">
+      <div class="anom-sum" id="anomSum"></div>
+      <div class="btns wrap">
+        <span class="seg small" id="anomKind">
+          <button data-k="" class="on">Все</button><button data-k="drop">Провалы</button><button data-k="spike">Всплески</button><button data-k="shape">Профиль</button>
+        </span>
+        <button class="btn small" id="anomExclude" title="Информационная кнопка">Исключить аномалии из обучения</button>
+      </div>
+    </div>
+    <div class="note hidden" id="anomNote"></div>
+    <div class="table-wrap anom-table"><table id="anomTable"><thead></thead><tbody></tbody></table></div>
+    <p class="hint" id="anomHint">Детектор сравнивает каждый день с ожидаемым по модели и размечает провалы, всплески и нетипичный суточный профиль. Точки на графике «Суточные итоги» (горизонт «Месяц», период факта): красная — провал, жёлтая — всплеск или аномальный профиль. Нажмите на строку, чтобы открыть месяц.</p>
+  </section>
+
+  <section class="card wide" id="modelCard">
+    <div class="card-h">
+      <h2>Модель</h2>
+      <span class="badge" id="modelBadge">структурная v08</span>
+    </div>
+    <div class="model-grid">
+      <div>
+        <h3>Как считается прогноз</h3>
+        <div id="modelDesc"></div>
+        <label class="sw big" id="hybridSwitch"><input type="checkbox" id="hybridToggle"><i></i><b>Гибрид ML</b><small id="hybridNote"></small></label>
+      </div>
+      <div>
+        <h3 id="foldTitle">Качество по фолдам</h3>
+        <div class="table-wrap" id="foldTable"></div>
+        <p class="hint" id="modelSummary"></p>
+      </div>
+      <div>
+        <h3>Внешние источники</h3>
+        <ul class="src" id="modelSources"></ul>
+        <h3>Факторы объяснения</h3>
+        <ul class="src" id="modelFactors"></ul>
+      </div>
+    </div>
+    <details class="model-more hidden" id="modelMore">
+      <summary>Отчёт ML: интервалы, ИИ-детектор, автоочистка, решения</summary>
+      <div class="model-tables" id="modelTables"></div>
+    </details>
   </section>
 
   <section class="card wide" id="heatCard">

@@ -6,3 +6,4 @@ docs
 scripts
 loadtest
 *.md
+!data/model_report.md

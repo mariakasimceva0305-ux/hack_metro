@@ -9,6 +9,8 @@ Outputs (all UTF-8):
   data/explain.csv   optional decomposition (copied if given/exists)
   data/stops.json    stops with coordinates per route/direction (routes with geometry only)
   data/routes.json   route names from the GTFS_ROUTES sheet
+  data/intervals.csv, anomalies.csv, hybrid_nov_dec.csv, hybrid_folds.csv, model_report.md
+                     optional ML layer copied from ../experiments/ml (--ml-dir); missing files are skipped
 """
 from __future__ import annotations
 
@@ -32,6 +34,7 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--forecast", default=str(ROOT / "submissions" / "final_candidate.csv"))
     ap.add_argument("--explain", default=str(ROOT / "submissions" / "final_candidate_explain.csv"))
+    ap.add_argument("--ml-dir", default=str(ROOT / "experiments" / "ml"))
     args = ap.parse_args()
     OUT.mkdir(exist_ok=True)
 
@@ -89,16 +92,38 @@ def main() -> None:
                     "weight": w,
                 }
             )
+    ml_files = copy_ml(Path(args.ml_dir))
     build_pipeline_report()
     build_weather()
     build_fleet(sheets, stops)
     from datetime import datetime
     meta = {"forecast_source": Path(args.forecast).name,
             "explain_source": Path(args.explain).name if args.explain and Path(args.explain).exists() else None,
+            "ml_files": ml_files,
             "built_at": datetime.now().isoformat(timespec="seconds")}
     (OUT / "meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=1), encoding="utf-8")
     (OUT / "stops.json").write_text(json.dumps(stops, ensure_ascii=False), encoding="utf-8")
     print("stops", len(stops), "routes with geometry:", sorted({s["route"] for s in stops}, key=int))
+
+
+ML_FILES = {"intervals.csv": "intervals.csv", "anomalies.csv": "anomalies.csv",
+            "hybrid_nov_dec.csv": "hybrid_nov_dec.csv", "hybrid_folds.csv": "hybrid_folds.csv",
+            "REPORT.md": "model_report.md"}
+
+
+def copy_ml(src: Path) -> list[str]:
+    """Copy the ML layer (prediction intervals, anomaly labels, hybrid forecast, report). Every file is optional;
+    a stale copy is removed when the source is gone so the bundle never mixes outputs of different ML runs."""
+    copied = []
+    for name, dst in ML_FILES.items():
+        f = src / name
+        if f.is_file():
+            shutil.copyfile(f, OUT / dst)
+            copied.append(name)
+        elif (OUT / dst).exists():
+            (OUT / dst).unlink()
+    print("ml <-", src, copied or "none")
+    return copied
 
 
 def build_weather() -> None:

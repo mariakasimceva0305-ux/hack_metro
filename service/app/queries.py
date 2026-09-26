@@ -77,12 +77,77 @@ def _cube_slice(st: Store, source: str, routes: list[str], a: date, b: date, h0:
     """Return [days, hours] aggregated over routes (optionally weighted: stop shares; optionally corrected)."""
     ri = [st.route_idx[r] for r in routes]
     i0, i1 = st.day_index(a), st.day_index(b)
-    sub = st.cubes[source][ri, i0:i1 + 1, h0:h1 + 1]
+    sub = _cube(st, source, adj)[ri, i0:i1 + 1, h0:h1 + 1]
     if adj.active and source != "history":
         sub = sub * adjust.factor(st, adj, routes, i0, i1, h0, h1)
     if weights is not None:
         sub = sub * np.asarray(weights, dtype=np.float32)[:, None, None]
     return _nansum(sub, 0) if len(ri) > 1 else sub[0]
+
+
+def _cube(st: Store, source: str, adj: Adj) -> np.ndarray:
+    """Cube of the selected forecast model (v08 or hybrid); actuals are the same for every model."""
+    if adj.model != "v08" and source != "history":
+        return st.cubes[f"{source}_{adj.model}"]
+    return st.cubes[source]
+
+
+def _band(st: Store, source: str, routes: list[str], a: date, b: date, h0: int, h1: int,
+          weights: list[float] | None = None, adj: Adj = NO_ADJ) -> tuple[np.ndarray, np.ndarray] | None:
+    """80 % interval (p10, p90) [days, hours] around the shown point forecast: value × p10/p50 and value × p90/p50
+    per cell; summed over routes/hours/days assuming fully correlated errors (quantiles add up). NaN on actual days."""
+    ml = st.ml
+    if source == "history" or ml is None or not ml.intervals:
+        return None
+    ri = [st.route_idx[r] for r in routes]
+    i0, i1 = st.day_index(a), st.day_index(b)
+    sub = _cube(st, source, adj)[ri, i0:i1 + 1, h0:h1 + 1]
+    if adj.active:
+        sub = sub * adjust.factor(st, adj, routes, i0, i1, h0, h1)
+    if weights is not None:
+        sub = sub * np.asarray(weights, dtype=np.float32)[:, None, None]
+    lo = sub * ml.rel_lo[ri, i0:i1 + 1, h0:h1 + 1]
+    hi = sub * ml.rel_hi[ri, i0:i1 + 1, h0:h1 + 1]
+    if len(ri) > 1:
+        return _nansum(lo, 0), _nansum(hi, 0)
+    return lo[0], hi[0]
+
+
+INTERVAL_INFO = {"level": 0.8, "label": "80 % интервал (P10–P90)",
+                 "method": "Квантили P10/P90 ML-модели в относительном виде (P10/P50, P90/P50) применены к показанному "
+                           "прогнозу; часы одних суток и маршруты суммируются как полностью коррелированные, "
+                           "сутки внутри месяца — как независимые (нормальное приближение)"}
+
+
+def _month_band(st: Store, m: np.ndarray, band, a: date, h0: int) -> tuple[list[dict], list[dict]]:
+    """Monthly totals: daily deviations from the point forecast are combined as independent (root of sum of squares)."""
+    v, lo, hi = (_nansum(x, 1) for x in (m, band[0], band[1]))
+    days = [st.day_at(st.day_index(a) + i) for i in range(len(v))]
+    acc: dict[str, list] = {}
+    for d, vv, ll, hh in zip(days, v, lo, hi):
+        rec = acc.setdefault(f"{d.year}-{d.month:02d}", [0.0, 0.0, 0.0, False])
+        if not np.isnan(ll):
+            rec[0] += float(vv); rec[1] += float(vv - ll) ** 2; rec[2] += float(hh - vv) ** 2; rec[3] = True
+    out_lo = [{"value": round(max(0.0, x[0] - x[1] ** 0.5), 1) if x[3] else None} for x in acc.values()]
+    out_hi = [{"value": round(x[0] + x[2] ** 0.5, 1) if x[3] else None} for x in acc.values()]
+    return out_lo, out_hi
+
+
+def _attach_band(st: Store, out: dict, band, a: date, h0: int, granularity: str, m: np.ndarray | None = None) -> dict:
+    if band is None:
+        return out
+    if granularity == "month" and m is not None:
+        lo, hi = _month_band(st, m, band, a, h0)
+    else:
+        lo = build_series(st, band[0], a, h0, granularity)
+        hi = build_series(st, band[1], a, h0, granularity)
+    any_band = False
+    for p, l, h in zip(out["points"], lo, hi):
+        p["p10"], p["p90"] = l["value"], h["value"]
+        any_band = any_band or l["value"] is not None
+    if any_band:
+        out["interval"] = INTERVAL_INFO
+    return out
 
 
 def _num(x) -> float | None:
@@ -165,14 +230,15 @@ def series_query(st: Store, source: str, route: str | None, date_from, date_to, 
     routes = resolve_routes(st, route, source=source)
     a, b, h0, h1 = resolve_period(st, source, date_from, date_to, hour_from, hour_to)
     m = _cube_slice(st, source, routes, a, b, h0, h1, adj=adj)
-    m0 = _cube_slice(st, source, routes, a, b, h0, h1) if adj.active else None
+    m0 = _cube_slice(st, source, routes, a, b, h0, h1, adj=adj.base) if adj.active else None
     out = {
-        "route": route or "all", "routes": routes, "source": source, "source_ru": SOURCE_RU[source],
+        "route": route or "all", "routes": routes, "source": source, "model": adj.model, "source_ru": SOURCE_RU[source],
         "granularity": granularity, "date_from": str(a), "date_to": str(b),
         "hour_from": h0, "hour_to": h1, "unit": UNIT,
         "summary": summarize(st, m, a, h0),
         "points": build_series(st, m, a, h0, granularity),
     }
+    _attach_band(st, out, _band(st, source, routes, a, b, h0, h1, adj=adj), a, h0, granularity, m)
     return _with_baseline(st, out, adj, source, m, m0, a, h0, granularity)
 
 
@@ -189,9 +255,9 @@ def stop_query(st: Store, stop_id: str, source: str, date_from, date_to, hour_fr
     routes = [r for r, _ in serving_data]
     w = [s for _, s in serving_data]
     m = _cube_slice(st, source, routes, a, b, h0, h1, weights=w, adj=adj)
-    m0 = _cube_slice(st, source, routes, a, b, h0, h1, weights=w) if adj.active else None
+    m0 = _cube_slice(st, source, routes, a, b, h0, h1, weights=w, adj=adj.base) if adj.active else None
     info = next(s for s in st.stops if s["stop_id"] == stop_id)
-    return _with_baseline(st, {
+    out = {
         "stop_id": stop_id, "name": info["name"], "lat": info["lat"], "lon": info["lon"],
         "routes": [{"route": r, "share": round(s, 4)} for r, s in serving_data],
         "estimate": True,
@@ -200,7 +266,9 @@ def stop_query(st: Store, stop_id: str, source: str, date_from, date_to, hour_fr
         "hour_from": h0, "hour_to": h1, "unit": UNIT,
         "summary": summarize(st, m, a, h0),
         "points": build_series(st, m, a, h0, granularity),
-    }, adj, source, m, m0, a, h0, granularity)
+    }
+    _attach_band(st, out, _band(st, source, routes, a, b, h0, h1, weights=w, adj=adj), a, h0, granularity, m)
+    return _with_baseline(st, out, adj, source, m, m0, a, h0, granularity)
 
 
 def routes_query(st: Store) -> dict:
@@ -258,7 +326,7 @@ def map_query(st: Store, route: str | None, day: str | None, source: str, adj: A
     route_hours, route_hours0 = {}, {}
     for r in {s["route"] for s in base["stops"]}:
         if r in st.route_idx:
-            route_hours0[r] = st.cubes[source][st.route_idx[r], di]
+            route_hours0[r] = _cube(st, source, adj)[st.route_idx[r], di]
             route_hours[r] = _cube_slice(st, source, [r], d, d, 0, 23, adj=adj)[0] if adj.active else route_hours0[r]
     vmax = 0.0
     for s in base["stops"]:
@@ -285,7 +353,7 @@ def kpi_query(st: Store, route: str | None, date_from, date_to, hour_from, hour_
     routes = resolve_routes(st, route, source=source)
     a, b, h0, h1 = resolve_period(st, source, date_from, date_to, hour_from, hour_to)
     m = _cube_slice(st, source, routes, a, b, h0, h1, adj=adj)
-    m0 = _cube_slice(st, source, routes, a, b, h0, h1) if adj.active else None
+    m0 = _cube_slice(st, source, routes, a, b, h0, h1, adj=adj.base) if adj.active else None
     s = summarize(st, m, a, h0)
     # Change vs previous month: avg daily load of the period vs avg daily of previous calendar month (fact+forecast).
     py, pm = (a.year, a.month - 1) if a.month > 1 else (a.year - 1, 12)
@@ -293,7 +361,7 @@ def kpi_query(st: Store, route: str | None, date_from, date_to, hour_from, hour_
     change = None
     lo, hi = st.coverage["combined"]
     if p_from >= lo:
-        pm_m = _cube_slice(st, "combined", routes, p_from, min(p_to, hi), h0, h1)
+        pm_m = _cube_slice(st, "combined", routes, p_from, min(p_to, hi), h0, h1, adj=adj.base)
         daily = _nansum(pm_m, 1)
         basis = "avg_day"
         if a == b:  # single day: compare with the same weekday of the previous month
@@ -439,6 +507,13 @@ def _fleet_route(st: Store, r: str, d: date, source: str, adj: Adj, p: dict) -> 
 
     di = st.day_index(d)
     hours = _cube_slice(st, source, [r], d, d, 0, 23, adj=adj)[0]
+    ml = st.ml
+    has_iv = bool(source != "history" and ml is not None and ml.intervals)
+    rlo = rhi = np.ones(24, dtype=np.float32)
+    if has_iv:
+        rlo = np.nan_to_num(ml.rel_lo[st.route_idx[r], di], nan=1.0)
+        rhi = np.nan_to_num(ml.rel_hi[st.route_idx[r], di], nan=1.0)
+    demand = hours * rhi if (has_iv and p["plan_by"] == "p90") else hours
     # reference supply ("плановый выпуск") = demand of the same weekday over the 4 preceding actual weeks
     ref = None
     if r in st.history_routes:
@@ -451,7 +526,7 @@ def _fleet_route(st: Store, r: str, d: date, source: str, adj: Adj, p: dict) -> 
     rows = []
     for h in range(24):
         b = hours[h]
-        req = need(b)
+        req = need(demand[h])
         plan = p["plan"] if p["plan"] is not None else (need(ref[h]) if ref is not None else None)
         if p["plan"] is not None and req == 0:
             plan = 0
@@ -461,7 +536,16 @@ def _fleet_route(st: Store, r: str, d: date, source: str, adj: Adj, p: dict) -> 
         # risk only where the reference has regular service (plan > 0): night edge hours are not flagged
         status = "none" if req == 0 and not plan else "ok" if not plan \
             else "risk" if (delta or 0) > 0 else "surplus" if delta is not None and delta < 0 else "ok"
+        # P(load > capacity): boardings that fill the supply (current plan, or the requirement for new routes)
+        # to 100 % of vehicle capacity; two-piece lognormal around the shown forecast (see app/ml.py)
+        p_over = None
+        if has_iv and b is not None and not np.isnan(b) and (plan or req):
+            supply = plan or req
+            cap_boardings = supply * cap * trips_per_veh_h * p["turnover"] / p["peak_share"]
+            p_over = round(ml_p_exceed(float(b), float(rlo[h]), float(rhi[h]), cap_boardings), 3)
         rows.append({"hour": h, "boardings": _num(b), "peak_dir_onboard": _num(onboard), "required": req,
+                     "boardings_p10": _num(b * rlo[h]) if has_iv else None,
+                     "boardings_p90": _num(b * rhi[h]) if has_iv else None, "p_overflow": p_over,
                      "plan": plan, "delta": delta, "load_at_plan_pct": round(load * 100) if load is not None else None,
                      "headway_min": round(rt_min / req, 1) if req else None, "status": status})
     return {"route": r, "length_km": round(length, 2), "length_source": "геометрия остановок" if info.get("length_km")
@@ -471,7 +555,15 @@ def _fleet_route(st: Store, r: str, d: date, source: str, adj: Adj, p: dict) -> 
             "passengers_per_vehicle_per_hour": round(per_veh_h, 1), "min_vehicles_service": min_veh,
             "plan_source": "задан вручную" if p["plan"] is not None else
             ("потребность по факту 4 предыдущих недель (тот же день недели)" if ref is not None else "нет истории (новый маршрут)"),
-            "hours": rows, "peak_required": max(x["required"] for x in rows)}
+            "hours": rows, "peak_required": max(x["required"] for x in rows),
+            "max_p_overflow": max((x["p_overflow"] for x in rows if x["p_overflow"] is not None), default=None),
+            "max_p_overflow_hour": max((x for x in rows if x["p_overflow"] is not None),
+                                       key=lambda x: x["p_overflow"], default={"hour": None})["hour"]}
+
+
+def ml_p_exceed(median: float, rel_lo: float, rel_hi: float, threshold: float) -> float:
+    from .ml import p_exceed
+    return p_exceed(median, rel_lo, rel_hi, threshold)
 
 
 def _fi(x) -> str:
@@ -501,7 +593,7 @@ def _veh(n: int) -> str:
 
 def fleet_query(st: Store, route: str | None, day: str | None, adj: Adj, capacity: int | None, load_target: float,
                 peak_share: float, turnover: float, speed: float | None, layover: float, max_headway: float,
-                plan: int | None, min_boardings: float = 30.0) -> dict:
+                plan: int | None, min_boardings: float = 30.0, plan_by: str = "p50") -> dict:
     routes = resolve_routes(st, route)
     lo, hi = st.coverage["combined"]
     d = parse_date(day, "date") or st.coverage["forecast"][0]
@@ -509,7 +601,7 @@ def fleet_query(st: Store, route: str | None, day: str | None, adj: Adj, capacit
         raise ApiError(400, "out_of_range", f"Дата должна быть с {lo} по {hi}")
     source = "history" if d <= st.coverage["history"][1] else "forecast"
     p = dict(capacity=capacity, load_target=load_target, peak_share=peak_share, turnover=turnover, speed=speed,
-             layover=layover, max_headway=max_headway, plan=plan, min_boardings=min_boardings)
+             layover=layover, max_headway=max_headway, plan=plan, min_boardings=min_boardings, plan_by=plan_by)
     per = [_fleet_route(st, r, d, source, adj, p) for r in routes
            if not (source == "history" and r not in st.history_routes)]
     recs = []
@@ -522,8 +614,11 @@ def fleet_query(st: Store, route: str | None, day: str | None, adj: Adj, capacit
             span = f"{a:02d}:00–{b + 1:02d}:00"
             if dlt > 0:
                 load = f", загрузка при текущем выпуске {peak['load_at_plan_pct']} %" if peak["load_at_plan_pct"] else ""
-                txt = (f"Маршрут {fr['route']}, {span}: +{dlt} {_veh(dlt)} (всего {peak['required']}; "
-                       f"прогноз {_fi(peak['boardings'])} пасс./ч{load})")
+                pov = max((x["p_overflow"] for x in xs if x["p_overflow"] is not None), default=None)
+                pov_s = f"; вероятность переполнения {round(pov * 100)} %" if pov is not None else ""
+                by = " по P90" if plan_by == "p90" and pov is not None else ""
+                txt = (f"Маршрут {fr['route']}, {span}: +{dlt} {_veh(dlt)} (всего {peak['required']}{by}; "
+                       f"прогноз {_fi(peak['boardings'])} пасс./ч{load}{pov_s})")
                 recs.append({"route": fr["route"], "from": a, "to": b, "delta": dlt, "type": "risk", "text": txt,
                              "severity": dlt * len(xs)})
             else:
@@ -537,9 +632,22 @@ def fleet_query(st: Store, route: str | None, day: str | None, adj: Adj, capacit
     recs.sort(key=lambda x: (0 if x["type"] == "risk" else 1 if x["type"] == "info" else 2, -abs(x["severity"])))
     total = [{"hour": h, "required": sum(fr["hours"][h]["required"] for fr in per),
               "plan": sum(fr["hours"][h]["plan"] or 0 for fr in per),
-              "boardings": _num(sum(fr["hours"][h]["boardings"] or 0 for fr in per))} for h in range(24)]
+              "boardings": _num(sum(fr["hours"][h]["boardings"] or 0 for fr in per)),
+              "p_overflow": max((fr["hours"][h]["p_overflow"] for fr in per if fr["hours"][h]["p_overflow"] is not None),
+                                default=None)} for h in range(24)]
+    worst = max((fr for fr in per if fr["max_p_overflow"] is not None), key=lambda fr: fr["max_p_overflow"], default=None)
+    iv = bool(source != "history" and st.ml is not None and st.ml.intervals)
     return {
         "route": route or "all", "date": str(d), "source": source, "adjusted": adj.active and source != "history",
+        "model": adj.model, "plan_by": plan_by if iv else "p50",
+        "overflow": {
+            "available": iv,
+            "max": worst["max_p_overflow"] if worst else None,
+            "route": worst["route"] if worst else None, "hour": worst["max_p_overflow_hour"] if worst else None,
+            "method": "P(входы за час > вместимость текущего выпуска при 100 % заполнения): логнормальное распределение "
+                      "по ячейке, подобранное по P10/P50/P90 ML-модели (σ слева и справа от медианы отдельно)"
+                      if iv else "нет интервалов прогноза (intervals.csv) или выбран период факта",
+        },
         "assumptions": {
             "capacity": capacity or "по классу из наряда: ОБК (71-931М) — 190, БК — 140 пасс. (≈5 чел./м²)",
             "load_target": load_target, "peak_share": peak_share, "turnover": turnover,
@@ -564,6 +672,13 @@ def explain_query(st: Store, route: str, day: str) -> dict:
     rows = st.explain.get((routes[0], str(d)))
     if not rows:
         raise ApiError(404, "explain_not_found", f"Нет декомпозиции для маршрута {routes[0]} на {d}")
+    ml = st.ml
+    if ml is not None and ml.hybrid and routes[0] in st.route_idx:
+        ri, di = st.route_idx[routes[0]], st.day_index(d)
+        if 0 <= di < st.n_days:
+            ratio, hyb = ml.hybrid_ratio[ri, di], st.cubes["forecast_hybrid"][ri, di]
+            rows = [x | {"ml_ratio": None if np.isnan(ratio[x["hour"]]) else round(float(ratio[x["hour"]]), 4),
+                         "prediction_hybrid": _num(hyb[x["hour"]])} for x in rows]
     daily = {"base": round(sum(x["base"] for x in rows), 1),
              "prediction": round(sum(x.get("prediction", x["prediction_recomputed"]) for x in rows), 1)}
     return {"available": True, "route": routes[0], "date": str(d), "factors": st.explain_cols, "daily": daily,
@@ -585,19 +700,158 @@ def export_rows(st: Store, source: str, route: str | None, date_from, date_to, h
     if corrected:
         k = 3 if granularity == "hour" else 2
         header = header[:k] + [col + " с коррекцией", "Прогноз модели"] + header[k + 1:]
+    with_iv = source != "history" and st.ml is not None and st.ml.intervals
+    if with_iv:
+        header = header + ["P10 (80 % интервал)", "P90 (80 % интервал)"]
     rows = []
     for r in routes:
         m = _cube_slice(st, source, [r], a, b, h0, h1, adj=adj)
         pts = build_series(st, m, a, h0, granularity)
         base = None
         if corrected:
-            base = [p["value"] for p in build_series(st, _cube_slice(st, source, [r], a, b, h0, h1), a, h0, granularity)]
+            base = [p["value"] for p in build_series(st, _cube_slice(st, source, [r], a, b, h0, h1, adj=adj.base), a, h0, granularity)]
+        iv = None
+        if with_iv:
+            bnd = _band(st, source, [r], a, b, h0, h1, adj=adj)
+            iv = (_month_band(st, m, bnd, a, h0) if granularity == "month" else
+                  (build_series(st, bnd[0], a, h0, granularity), build_series(st, bnd[1], a, h0, granularity)))
         for i, p in enumerate(pts):
             extra = [base[i]] if corrected else []
+            tail = [iv[0][i]["value"], iv[1][i]["value"]] if iv else []
             if granularity == "hour":
-                rows.append([r, p["date"], p["hour"], p["value"], *extra])
+                rows.append([r, p["date"], p["hour"], p["value"], *extra, *tail])
             elif granularity == "day":
-                rows.append([r, p["date"], p["value"], *extra])
+                rows.append([r, p["date"], p["value"], *extra, *tail])
             else:
-                rows.append([r, p["month"], p["value"], *extra, p["days"], p["avg_per_day"]])
+                rows.append([r, p["month"], p["value"], *extra, p["days"], p["avg_per_day"], *tail])
     return header, rows
+
+
+# ---------------- AI / ML layer ----------------
+TRAINING_NOTE = ("Кнопка информационная: модель уже учится на очищенной истории. Праздники, ремонты и сбои "
+                 "исключаются ручной разметкой аналитиков и автоочисткой по ИИ-детектору с «защитой режима» "
+                 "(продолжающийся режим, например ремонт маршрута 50 по выходным, не выбрасывается). На бэктесте такая "
+                 "автоочистка воспроизводит ручную очистку, поэтому повторно исключать аномалии не нужно.")
+
+
+def anomalies_query(st: Store, route: str | None, date_from, date_to, kind: str | None = None) -> dict:
+    routes = resolve_routes(st, route)
+    lo, hi = st.coverage["history"]
+    a = parse_date(date_from, "date_from") or lo
+    b = parse_date(date_to, "date_to") or (a if date_from and not date_to else hi)
+    if b < a:
+        raise ApiError(400, "invalid_period", f"Дата окончания ({b}) раньше даты начала ({a})")
+    ml = st.ml
+    base = {"route": route or "all", "date_from": str(a), "date_to": str(b), "training_note": TRAINING_NOTE,
+            "kinds": {"drop": "провал", "spike": "всплеск", "shape": "аномальный профиль"}}
+    if ml is None or not ml.anomalies:
+        return base | {"available": False, "count": 0, "by_kind": {}, "events": [],
+                       "message": "ИИ-детектор аномалий ещё не подключён: нет файла anomalies.csv"}
+    rs, sa, sb = set(routes), str(a), str(b)
+    ev = [e for e in ml.anomalies if e["route"] in rs and sa <= e["date"] <= sb and (not kind or e["kind"] == kind)]
+    by_kind: dict[str, int] = {}
+    for e in ev:
+        by_kind[e["kind"]] = by_kind.get(e["kind"], 0) + 1
+    return base | {"available": True, "count": len(ev), "by_kind": by_kind, "events": ev,
+                   "total_in_history": len(ml.anomalies)}
+
+
+FACTORS = [
+    {"key": "base", "name": "Базовый профиль", "description": "уровень маршрута (последние недели) × суточная форма по типу дня"},
+    {"key": "special_mult", "name": "Особый день", "description": "праздники, переносы рабочих дней, предпраздничные дни (производственный календарь)"},
+    {"key": "weather_mult", "name": "Погода", "description": "осадки 06–21 ч (−1,1 %/мм от нормы) и мороз ниже −10 °C (−3,4 %)"},
+    {"key": "rules_mult", "name": "Сетевые события", "description": "запуск маршрута 5 с 16.12, изменения маршрутов, бесплатный проезд в новогоднюю ночь"},
+    {"key": "ml_ratio", "name": "ML-поправка (LightGBM)", "description": "отношение факт/структурный прогноз, предсказанное градиентным бустингом по календарю, погоде, событиям и загруженности дорог"},
+]
+SOURCES = [
+    {"name": "Погода: Open-Meteo (архив ERA5)", "what": "почасовые осадки, температура, снег по Москве",
+     "url": "https://open-meteo.com/en/docs/historical-weather-api", "used_in": "weather_mult, признаки ML"},
+    {"name": "Производственный календарь 2025", "what": "выходные, праздники, переносы, сокращённые дни",
+     "url": "https://www.consultant.ru/law/ref/calendar/proizvodstvennye/2025/", "used_in": "special_mult, признаки ML"},
+    {"name": "События и перекрытия (Дептранс)", "what": "перекрытия, изменения маршрутов, запуск маршрута 5",
+     "url": "https://transport.mos.ru/mostrans/closures", "used_in": "rules_mult, признаки ML"},
+    {"name": "Загруженность дорог (ЦОДД, «Дептранс. Оперативно»)", "what": "балл пробок 0–10 и средняя скорость по постам ЦОДД",
+     "url": "https://t.me/DtOperativno", "used_in": "признаки ML (+2 % пассажиров трамвая в дни ≥ 7 баллов)"},
+]
+
+
+TABLE_TITLES = [  # (keyword in heading/header, Russian title)
+    ("decision", "Решения по ML-компонентам"),
+    ("hybrid", "Гибрид: точность по фолдам (метрика соревнования, выше — лучше)"),
+    ("interval", "Интервалы P10–P90: методы (среднее по 5 фолдам)"),
+    ("known cause", "ИИ-детектор: полнота по известным причинам"),
+    ("variant", "Автоочистка истории против ручной (Δ ×10⁻³)"),
+    ("fold", "Точность по фолдам"),
+]
+CELL_RU = {"Component": "Компонент", "Method": "Метод", "Fold result": "Результат на фолдах", "Decision": "Решение",
+           "Hybrid": "Гибрид", "Intervals": "Интервалы", "Anomalies": "Аномалии", "keep v08": "оставить v08",
+           "monitoring tool": "инструмент мониторинга", "Known cause": "Известная причина", "Recall": "Полнота",
+           "Variant": "Вариант", "mean": "среднее", "coverage": "покрытие", "width": "ширина"}
+
+
+def _title(t: dict) -> str:
+    txt = f"{t.get('heading') or ''} {' '.join(t['header'])}".lower()
+    return next((ru for k, ru in TABLE_TITLES if k in txt), t.get("heading") or "Таблица")
+
+
+def model_query(st: Store) -> dict:
+    from . import ml as mlmod
+    ml = st.ml or mlmod.MLData()
+    tables = mlmod.parse_md_tables(ml.report_md) if ml.report_md else []
+    for t in tables:
+        t["title"] = _title(t)
+        t["header"] = [CELL_RU.get(h, h) for h in t["header"]]
+        t["rows"] = [[CELL_RU.get(v, v) for v in r] for r in t["rows"]]
+    fold_idx = mlmod.pick_fold_table(tables)
+    if ml.folds_table and (fold_idx is None or not any("fold" in " ".join(t["header"]).lower() for t in tables)):
+        tables = [ml.folds_table | {"title": ml.folds_table["heading"]}] + tables
+        fold_idx = 0
+    hyb_pct = None
+    if ml.hybrid:
+        a, b = st.coverage["forecast"]
+        i0, i1 = st.day_index(a), st.day_index(b)
+        v08 = float(np.nansum(st.cubes["forecast"][:, i0:i1 + 1]))
+        hyb = float(np.nansum(st.cubes["forecast_hybrid"][:, i0:i1 + 1]))
+        hyb_pct = round((hyb / v08 - 1) * 100, 2) if v08 else None
+    zero_w = bool(ml.hybrid and (ml.hybrid_weight_zero or (hyb_pct is not None and abs(hyb_pct) < 0.01)))
+    hybrid_txt = ("Гибрид: к структурному прогнозу применяется поправка LightGBM, прогноз = base × (1 − w + w·r̂), "
+                  "где r̂ — предсказанное бустингом отношение факт/структурный прогноз по календарю, погоде, событиям и "
+                  "загруженности дорог (55 исторических точек прогноза). ")
+    gap = (f" (от отправленного v08 отличается на {hyb_pct:+.2f} % за ноябрь–декабрь)".replace(".", ",").replace("-", "−")
+           if hyb_pct is not None and abs(hyb_pct) >= 0.01 else "")
+    hybrid_txt += (f"На скользящем бэктесте бустинг не улучшил точность, поэтому в финале вес w = 0: гибридный ряд равен "
+                   f"структурной базе без ML-поправки{gap}, а поправка ml_ratio показана как объясняющий фактор."
+                   if zero_w or not ml.hybrid else
+                   f"Гибрид отличается от v08 на {hyb_pct:+.2f} % за ноябрь–декабрь.".replace(".", ",", 1))
+    out = {
+        "hybrid_available": ml.hybrid, "intervals_available": ml.intervals,
+        "anomalies_available": bool(ml.anomalies), "report_available": ml.report_md is not None,
+        "hybrid_weight_zero": zero_w,
+        "description": [
+            "Структурная модель (v08): прогноз = базовый профиль × особый день × погода × сетевые события. "
+            "Базовый профиль — уровень маршрута за последние недели × суточная форма по типу дня. "
+            "Модель прозрачна: каждый множитель виден в блоке «Из чего складывается прогноз».",
+            hybrid_txt,
+            "Интервалы P10–P90: конформные квантили по часу, типу дня и горизонту прогноза, откалиброванные на "
+            "скользящем бэктесте (покрытие — в таблице ниже). По ним для каждого часа считается вероятность "
+            "переполнения: раздельное логнормальное распределение через P10/P50/P90.",
+            "ИИ-детектор аномалий без учителя (IsolationForest и робастные z-оценки уровня, доли маршрута и суточного "
+            "профиля) размечает дни истории: провал, всплеск, аномальный профиль. Автоочистка с «защитой режима» "
+            "воспроизводит ручную очистку аналитиков; детектор работает как инструмент мониторинга.",
+        ],
+        "summary": mlmod.report_text(ml.report_md),
+        "tables": tables, "fold_table": fold_idx,
+        "sources": SOURCES,
+        "factors": [(f | {"description": f["description"] + " (в финале вес 0 — справочно)"}) if f["key"] == "ml_ratio" and zero_w else f
+                    for f in FACTORS if f["key"] in (["base"] + st.explain_cols) or (f["key"] == "ml_ratio" and ml.hybrid)],
+        "files": {"intervals_rows": ml.intervals_rows, "hybrid_rows": ml.hybrid_rows, "anomalies": len(ml.anomalies)},
+        "errors": ml.errors,
+    }
+    if ml.hybrid:
+        out["hybrid_compare"] = {"v08_total": round(v08), "hybrid_total": round(hyb), "pct": hyb_pct}
+    if ml.intervals:
+        fc = st.cubes["forecast"]
+        w = np.nan_to_num(fc)
+        width = np.nan_to_num(ml.rel_hi - ml.rel_lo)
+        out["interval_avg_width_pct"] = round(float((w * width).sum() / w.sum() * 100), 1) if w.sum() else None
+    return out

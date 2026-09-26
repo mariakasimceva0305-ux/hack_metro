@@ -39,6 +39,7 @@ class Store:
     weather_ref_pr: float = 0.0                   # reference precipitation (Oct 18-31 mean), as in src/adjust.py
     fleet: dict = field(default_factory=dict)
     launch: dict = field(default_factory=dict)    # route -> first forecast date with passengers (new routes)
+    ml: object = None                             # app.ml.MLData: intervals, anomalies, hybrid, report (optional)
 
     # ---------- helpers ----------
     def day_index(self, d: date) -> int:
@@ -112,6 +113,8 @@ def load() -> Store:
     fleet_p = config.DATA_DIR / "fleet.json"
     if fleet_p.is_file():
         st.fleet = json.loads(fleet_p.read_text(encoding="utf-8"))
+    from . import ml
+    st.ml = ml.load(st)
     return st
 
 

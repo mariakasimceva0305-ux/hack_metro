@@ -29,3 +29,8 @@ Ceiling analysis: a perfect daily level gives ≈0.92, an in-period oracle profi
 
 **Final submission: v08 (LB 0.90167)** → `submissions/FINAL_SUBMISSION.csv`.
 | 14 | traffic source | ЦОДД congestion score (Deptrans channel) vs residuals | OOS +0.0002…+0.0004 | – | – | confirmed small effect (+2 % on 7+ days); documented as 4th external source |
+| 15 | ML hybrid | structural base × LightGBM ratio (55 origins, weather/traffic/calendar), blend weight by CV | GBM −0.019…−0.026; best w = 0 (0/5 folds win) | – | – | ML kept as explanatory `ml_ratio`, forecast = v08 |
+| 16 | ML intervals | conformal quantiles by hour × day type × horizon (×1.15) vs LightGBM quantile | coverage 78 % (82 % weighted), pinball 4.5 % Σy | – | – | shipped: P10/P90 band + probability of overcrowding |
+| 17 | ML anomaly detector | IsolationForest + robust z (level, share, hourly shape) + regime guard | 87 % of flags explained; auto-clean +0.0004 | – | – | shipped as monitoring («ИИ-детектор аномалий»), found route-12 diversion 1–4 Apr |
+
+Branch `ml-ai`: ML/AI layer (src/ml, experiments/ml/REPORT.md, service AI panels, dispatcher assistant). `main` keeps the v08 release untouched.

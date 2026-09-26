@@ -21,6 +21,7 @@
     routes: [], coverage: null, explainAvailable: false, map: null, playing: null, band: 10,
     adj: { level: 1, scope: "all", special: 1, precip: -1.1, cold: -3.4, floor: 0.9, scn: [], events: [] },
     lastFit: null,
+    model: "v08", planP90: false, ml: {}, anomKind: "",
   };
   const ADJ_DEFAULT = JSON.stringify({ level: 1, scope: "all", special: 1, precip: -1.1, cold: -3.4, floor: 0.9, scn: [], events: [] });
   const num = (v) => Math.round(v * 10000) / 10000;
@@ -36,12 +37,13 @@
     return out;
   }
   const adjActive = () => Object.keys(adjParams()).length > 0;
-  const ADJ_PATHS = new Set(["/series", "/forecast", "/forecast/stop", "/kpi", "/map", "/fleet", "/scenario/year", "/weather"]);
+  const ADJ_PATHS = new Set(["/series", "/forecast", "/forecast/stop", "/kpi", "/map", "/fleet", "/scenario/year", "/weather", "/assistant"]);
+  const modelParams = () => (S.model === "hybrid" ? { model: "hybrid" } : {});
 
   // ---------------- API ----------------
   const cache = new Map();
   async function api(path, params = {}) {
-    if (ADJ_PATHS.has(path)) params = { ...params, ...adjParams() };
+    if (ADJ_PATHS.has(path)) params = { ...params, ...adjParams(), ...modelParams() };
     const q = new URLSearchParams(Object.entries(params).filter(([, v]) => v !== null && v !== undefined && v !== ""));
     const url = `${API}${path}?${q}`;
     if (cache.has(url)) return cache.get(url);
@@ -98,8 +100,10 @@
     $("hour").value = S.hour;
     const h = await api("/health");
     $("footInfo").textContent = `Прогноз: ${h.forecast_file === "forecast.csv" && h.data_bundle?.forecast_source ? h.data_bundle.forecast_source : h.forecast_file}${h.explain_loaded ? " (с декомпозицией)" : ""}.`;
+    S.ml = h.ml || {};
     loadDataQuality();
     initAdjControls();
+    initAi();
     bind();
     initMap();
     await refresh();
@@ -167,7 +171,7 @@
     renderAdjInfo();
     $("stopChip").classList.toggle("hidden", !S.stop);
     if (S.stop) $("stopChip").textContent = `Остановка: ${S.stopName} ✕`;
-    const jobs = [loadMap(), loadKpis(), loadLine(), loadHeat(), loadTable(), loadExplain(), loadFleet(), loadWeatherInfo()];
+    const jobs = [loadMap(), loadKpis(), loadLine(), loadHeat(), loadTable(), loadExplain(), loadFleet(), loadWeatherInfo(), loadAnomalies()];
     const res = await Promise.allSettled(jobs);
     if (my !== seq) return;
     const err = res.find((r) => r.status === "rejected");
@@ -463,7 +467,7 @@
     const c1 = css("--series-1"), c2 = css("--series-2");
     if (!routeHasData(S.route)) { chart("lineChart", "line").clear(); $("lineHint").textContent = "Для маршрута нет данных о пассажиропотоке."; return; }
     const who = S.stop ? `остановка «${S.stopName}» (оценка)` : S.route === "all" ? "все маршруты" : `маршрут № ${S.route}`;
-    let opt;
+    let opt, lineNote = "";
     if (S.horizon === "day") {
       const src = srcFor(S.date);
       // comparison: same weekday, latest actual day before the selected date
@@ -478,12 +482,19 @@
         hasCmp ? stopOrRoute("history", cmpStr, cmpStr, "hour") : Promise.resolve(null),
       ]);
       const hrs = main.points.map((p) => `${pad(p.hour)}:00`);
-      const series = [line(`${src === "history" ? "Факт" : main.adjusted ? "Прогноз с коррекцией" : "Прогноз"}, ${short(S.date)} (${WD[d.getDay()]})`, main.points.map((p) => p.value), src === "history" ? c1 : c2, { showSymbol: true })];
+      const series = [line(`${src === "history" ? "Факт" : main.adjusted ? "Прогноз с коррекцией" : "Прогноз"}${main.model === "hybrid" ? " (гибрид ML)" : ""}, ${short(S.date)} (${WD[d.getDay()]})`, main.points.map((p) => p.value), src === "history" ? c1 : c2, { showSymbol: true })];
       if (main.adjusted) series.push(line("Прогноз модели (без коррекции)", main.baseline.values, css("--text-muted"), { lineStyle: { width: 2, type: "dashed", color: css("--text-muted") } }));
       if (ref) series.unshift(line(`Факт, ${short(cmpStr)} (тот же день недели)`, ref.points.map((p) => p.value), c1, src === "history" ? { lineStyle: { width: 2, color: c1, type: "dashed" } } : {}));
+      const band = bandOf(main);
+      if (band) series.push(...bandSeries(band, c2));
+      const dayAn = src === "history" ? await anomaliesFor(S.date, S.date) : [];
       opt = { ...baseOpt(), xAxis: xAxis(hrs), series };
+      opt.tooltip = { ...opt.tooltip, formatter: lineTooltip(band, null) };
+      opt.legend = { ...opt.legend, data: series.map((x) => x.name).filter((n) => !n.startsWith("_")) };
+      if (dayAn.length) lineNote = " ИИ-детектор: " + dayAn.map((e) => `${e.kind_ru} (маршрут ${e.route}): ${e.label}`).join("; ") + ".";
       $("lineTitle").textContent = `Почасовая загрузка: ${who}`;
-      $("lineHint").textContent = (ref ? "Сравнение с последним фактическим днём той же недели. " : "Факта для сравнения нет (новый маршрут). ") + `Часы ${pad(S.hourFrom)}:00–${pad(S.hourTo)}:59.`;
+      $("lineHint").textContent = (ref ? "Сравнение с последним фактическим днём той же недели. " : "Факта для сравнения нет (новый маршрут). ") + `Часы ${pad(S.hourFrom)}:00–${pad(S.hourTo)}:59.`
+        + (band ? " Заливка — 80 % интервал прогноза (P10–P90): с вероятностью 80 % фактическая загрузка окажется внутри." : "") + lineNote;
     } else if (S.horizon === "month") {
       const [a, b] = monthRange(S.month);
       const src = srcFor(a);
@@ -494,15 +505,33 @@
       const r = await stopOrRoute(src, a, b, "day");
       const days = r.points.map((p) => p.date);
       const color = src === "history" ? c1 : c2;
-      const bars = { name: src === "history" ? "Факт, пасс./сутки" : r.adjusted ? "Прогноз с коррекцией, пасс./сутки" : "Прогноз, пасс./сутки", type: "bar", barWidth: "62%",
+      const bars = { name: src === "history" ? "Факт, пасс./сутки" : (r.adjusted ? "Прогноз с коррекцией" : "Прогноз") + (r.model === "hybrid" ? " (гибрид ML)" : "") + ", пасс./сутки", type: "bar", barWidth: "62%",
         data: r.points.map((p) => ({ value: p.value, itemStyle: { color, opacity: [0, 6].includes(parse(p.date).getDay()) ? 0.55 : 1, borderRadius: [4, 4, 0, 0] } })),
         itemStyle: { color } };
       const series = [bars];
       if (r.adjusted) series.push(line("Прогноз модели (без коррекции)", r.baseline.values, css("--text-muted"), { showSymbol: true, symbolSize: 5, lineStyle: { width: 2, type: "dashed", color: css("--text-muted") } }));
+      const band = bandOf(r);
+      if (band) series.push(...bandSeries(band, color));
+      let anByIdx = null;
+      if (src === "history" && !S.stop) {
+        const ev = await anomaliesFor(a, b);
+        if (ev.length) {
+          anByIdx = {};
+          ev.forEach((e) => { const i = days.indexOf(e.date); if (i >= 0) (anByIdx[i] = anByIdx[i] || []).push(e); });
+          const cBad = css("--bad"), cWarn = css("--warn");
+          series.push({ name: "Аномалия (ИИ-детектор)", type: "scatter", symbolSize: 11, z: 5,
+            data: days.map((_, i) => anByIdx[i] ? { value: [i, (r.points[i].value || 0) * 1.05], itemStyle: { color: anByIdx[i].some((e) => e.kind === "drop") ? cBad : cWarn, borderColor: css("--surface-1"), borderWidth: 2 } } : null).filter(Boolean),
+            itemStyle: { color: cBad } });
+        }
+      }
       opt = { ...baseOpt(), xAxis: xAxis(days.map((x) => `${short(x)} ${WD[parse(x).getDay()]}`), { axisLabel: { color: css("--text-secondary"), interval: 1, rotate: 0, fontSize: 11 } }), series };
+      opt.tooltip = { ...opt.tooltip, formatter: lineTooltip(band, anByIdx) };
+      opt.legend = { ...opt.legend, data: series.map((x) => x.name).filter((n) => !n.startsWith("_")) };
+      if (band) lineNote = " Заливка — 80 % интервал прогноза (P10–P90).";
+      if (anByIdx) lineNote = ` Точки — аномальные дни по ИИ-детектору (${Object.keys(anByIdx).length}): красная — провал, жёлтая — всплеск или нетипичный профиль.`;
       $("lineTitle").textContent = `Суточные итоги за ${MONTHS[parse(a).getMonth()]} 2025: ${who}`;
       const sm = r.summary;
-      $("lineHint").textContent = `Всего ${fmt(sm.total)} пасс., в среднем ${fmt(sm.avg_per_day)} в сутки. Выходные показаны светлее.` + (r.adjusted ? ` Коррекция: ${sign(r.delta.pct)} % к прогнозу модели.` : "");
+      $("lineHint").textContent = `Всего ${fmt(sm.total)} пасс., в среднем ${fmt(sm.avg_per_day)} в сутки. Выходные показаны светлее.` + (r.adjusted ? ` Коррекция: ${sign(r.delta.pct)} % к прогнозу модели.` : "") + lineNote;
     } else {
       if (S.stop) { S.stop = null; $("stopChip").classList.add("hidden"); }
       const y = await api("/scenario/year", { route: S.route, growth: S.growth, band: S.band });
@@ -620,6 +649,10 @@
       `<table><tr><td>Базовый профиль (уровень × суточная форма)</td><td>${fmt(row.base)}</td></tr>` +
       e.factors.map((f) => `<tr><td>${names[f] || f}</td><td>${dash(row[f])}</td></tr>`).join("") +
       `<tr><td><b>= Прогноз на час</b></td><td>${fmt(pred)}</td></tr>` +
+      (S.model === "hybrid" && row.ml_ratio !== undefined && row.ml_ratio !== null
+        ? (S.hybridZero
+          ? `<tr><td>ML-поправка LightGBM (справочно: в финале вес 0)</td><td>×${row.ml_ratio.toFixed(3)}</td></tr>`
+          : `<tr><td>ML-поправка (LightGBM)</td><td>×${row.ml_ratio.toFixed(3)}</td></tr><tr><td><b>= Прогноз гибрида</b></td><td>${fmt(row.prediction_hybrid)}</td></tr>`) : "") +
       `<tr><td class="muted">За сутки: база → прогноз</td><td class="muted">${fmt(e.daily.base)} → ${fmt(e.daily.prediction)}</td></tr></table>` +
       (Math.abs((row.prediction ?? row.prediction_recomputed) - row.prediction_recomputed) > Math.max(2, 0.02 * row.prediction_recomputed)
         ? `<p class="hint">Прогноз на этот час задан отдельным правилом (например, для нового маршрута) и не равен произведению множителей.</p>` : "") +
@@ -644,12 +677,13 @@
 
   async function loadFleet() {
     const card = $("fleetCard");
-    if (!routeHasData(S.route)) { card.classList.add("hidden"); return; }
+    if (!routeHasData(S.route)) { card.classList.add("hidden"); renderOverflowKpi(null); return; }
     card.classList.remove("hidden");
     const d = S.date;
     const val = (id) => ($(id).value === "" ? null : $(id).value);
     const r = await api("/fleet", { route: S.route, date: d, capacity: val("fCap"), load_target: val("fLoad"), peak_share: val("fShare"),
-      turnover: val("fTurn"), speed: val("fSpeed"), layover: val("fLay"), max_headway: val("fHead") });
+      turnover: val("fTurn"), speed: val("fSpeed"), layover: val("fLay"), max_headway: val("fHead"), plan_by: S.planP90 ? "p90" : null });
+    renderOverflowKpi(r);
     $("fleetDate").textContent = human(d);
     $("fleetBadge").textContent = `${r.source === "history" ? "по факту" : r.adjusted ? "по прогнозу с коррекцией" : "по прогнозу"} · ${short(d)}`;
     const one = r.routes.length === 1 ? r.routes[0] : null;
@@ -657,16 +691,22 @@
     const cRisk = css("--bad"), cOk = css("--series-1"), cSur = css("--good"), cPlan = css("--text-secondary");
     const colorOf = (st) => (st === "risk" ? cRisk : st === "surplus" ? cSur : cOk);
     const hrs = rows.map((x) => `${pad(x.hour)}`);
+    const hasP = r.overflow && r.overflow.available;
     const opt = {
       ...baseOpt(),
       tooltip: { ...baseOpt().tooltip, valueFormatter: (v) => (v === null || v === undefined ? "—" : fmt(v)) },
       xAxis: xAxis(hrs),
-      grid: { left: 44, right: 12, top: 36, bottom: 30 },
+      grid: { left: 44, right: hasP ? 46 : 12, top: 36, bottom: 30 },
+      yAxis: hasP ? [baseOpt().yAxis, { type: "value", min: 0, max: 100, splitLine: { show: false }, axisLabel: { color: css("--text-secondary"), formatter: "{value} %" } }] : baseOpt().yAxis,
       series: [
         { name: "Требуется вагонов на линии", type: "bar", barWidth: "60%", data: rows.map((x) => ({ value: x.required, itemStyle: { color: colorOf(x.status), borderRadius: [4, 4, 0, 0] } })), itemStyle: { color: cOk } },
         { name: one && one.plan_source.startsWith("нет истории") ? "Текущий выпуск (нет данных)" : "Текущий выпуск (оценка по факту 4 недель)", type: "line", step: "middle", data: rows.map((x) => x.plan), showSymbol: false, lineStyle: { color: cPlan, width: 2, type: "dashed" }, itemStyle: { color: cPlan } },
       ],
     };
+    if (hasP) opt.series.push({ name: "Вероятность переполнения, %", type: "line", yAxisIndex: 1, smooth: true, showSymbol: false,
+      data: rows.map((x) => (x.p_overflow === null || x.p_overflow === undefined ? null : Math.round(x.p_overflow * 100))),
+      lineStyle: { color: css("--series-2"), width: 2 }, itemStyle: { color: css("--series-2") },
+      tooltip: { valueFormatter: (v) => (v === null || v === undefined ? "—" : `${v} %`) } });
     chart("fleetChart", "fleet").setOption(opt, true);
     const recs = r.recommendations;
     const tag = { risk: ["risk", "риск давки"], surplus: ["surplus", "резерв"], info: ["info", "новый"] };
@@ -678,7 +718,211 @@
     $("fleetHint").textContent = (one ? `Маршрут ${one.route}: длина ${String(one.length_km).replace(".", ",")} км (${one.length_source}), оборот ${fmt(one.round_trip_min)} мин, `
       + `${one.vehicle_model}, вместимость ${one.capacity} пасс., ${String(one.passengers_per_vehicle_per_hour).replace(".", ",")} пасс./ч на вагон при целевой загрузке. ` : "")
       + `Формула: ${a.formula}. Скорость ${String(a.speed_kmh).replace(".", ",")} км/ч (${a.speed_source}). Красный — риск переполнения (нужно больше вагонов, чем в текущем выпуске), зелёный — резерв вместимости. `
-      + `Текущий выпуск оценён по фактическому спросу 4 предыдущих недель (тот же день недели), т. к. фактических нарядов по часам в данных нет.`;
+      + `Текущий выпуск оценён по фактическому спросу 4 предыдущих недель (тот же день недели), т. к. фактических нарядов по часам в данных нет.`
+      + (hasP ? ` Оранжевая линия — вероятность переполнения: ${r.overflow.method}.` : "")
+      + (r.plan_by === "p90" ? " Потребность посчитана по P90 — с запасом на верхнюю границу прогноза." : "");
+  }
+
+  // ---------------- AI / ML layer ----------------
+  const BAND = "80 % интервал";
+  function bandOf(r) {
+    if (!r || !r.interval) return null;
+    const lo = r.points.map((p) => (p.p10 === undefined ? null : p.p10)), hi = r.points.map((p) => (p.p90 === undefined ? null : p.p90));
+    return lo.some((v) => v !== null) ? { lo, hi } : null;
+  }
+  function bandSeries(band, color) {
+    const base = { type: "line", stack: "iv", symbol: "none", silent: true, lineStyle: { opacity: 0 }, connectNulls: false, z: 1 };
+    return [
+      { ...base, name: "_iv_lo", data: band.lo, tooltip: { show: false } },
+      { ...base, name: BAND, data: band.lo.map((v, i) => (v === null || band.hi[i] === null ? null : Math.max(0, band.hi[i] - v))),
+        areaStyle: { color, opacity: 0.2 }, itemStyle: { color } },
+    ];
+  }
+  function lineTooltip(band, anByIdx) {
+    return (params) => {
+      const arr = (Array.isArray(params) ? params : [params]).filter((p) => p && p.seriesName);
+      if (!arr.length) return "";
+      const i = arr[0].dataIndex;
+      let s = `${esc(arr[0].axisValueLabel ?? arr[0].name ?? "")}<br>`;
+      for (const p of arr) {
+        if (p.seriesName.startsWith("_") || p.seriesName === BAND || p.seriesType === "scatter") continue;
+        const v = Array.isArray(p.value) ? p.value[1] : p.value;
+        s += `${p.marker}${esc(p.seriesName)}: <b>${fmt(v)}</b><br>`;
+      }
+      if (band && band.lo[i] !== null && band.lo[i] !== undefined) s += `<span style="color:${css("--text-muted")}">${BAND}: ${fmt(band.lo[i])} – ${fmt(band.hi[i])}</span><br>`;
+      for (const e of (anByIdx && anByIdx[i]) || []) {
+        s += `<span style="color:${e.kind === "drop" ? css("--bad") : css("--warn")}">● ${esc(e.kind_ru)}${S.route === "all" ? `, маршрут ${e.route}` : ""}: ${esc(e.label)}`
+          + `${e.deviation_pct !== null ? ` (${sign(e.deviation_pct)} % к типичному дню)` : ""}</span><br>`;
+      }
+      return s;
+    };
+  }
+  async function anomaliesFor(a, b) {
+    if (!S.ml.anomalies) return [];
+    try {
+      const r = await api("/anomalies", { route: S.route, date_from: a, date_to: b });
+      return r.available ? r.events : [];
+    } catch { return []; }
+  }
+  function renderOverflowKpi(r) {
+    const o = (r && r.overflow) || {}, el = $("kOver");
+    el.classList.remove("risk", "warn");
+    $("kOverLabel").textContent = r ? `Вероятность переполнения, ${short(r.date)}` : "Вероятность переполнения";
+    if (!r || !o.available || o.max === null || o.max === undefined) {
+      el.textContent = "—";
+      $("kOverSub").textContent = !r ? "нет данных о пассажиропотоке" : r.source === "history" ? "считается для дней прогноза" : "нет интервалов прогноза (ML)";
+      return;
+    }
+    const pct = Math.round(o.max * 100);
+    el.textContent = `${pct} %`;
+    if (pct >= 50) el.classList.add("risk"); else if (pct >= 20) el.classList.add("warn");
+    $("kOverSub").textContent = `макс. за сутки: № ${o.route}, ${pad(o.hour)}:00–${pad((o.hour + 1) % 24)}:00${r.plan_by === "p90" ? " · выпуск по P90" : ""}`;
+  }
+
+  function initAi() {
+    const ml = S.ml;
+    $("modelBox").classList.toggle("hidden", !ml.hybrid);
+    $("modelSeg").onclick = (e) => { const b = e.target.closest("button"); if (b) setModel(b.dataset.m); };
+    $("hybridToggle").disabled = !ml.hybrid;
+    $("hybridToggle").onchange = (e) => setModel(e.target.checked ? "hybrid" : "v08");
+    $("fP90").disabled = !ml.intervals;
+    $("fP90Box").title = ml.intervals ? "Считать потребность по верхней границе 80 % интервала (P90), а не по медиане" : "Нужны интервалы прогноза (intervals.csv)";
+    $("fP90").onchange = (e) => { S.planP90 = e.target.checked; loadFleet().catch((x) => toast(x.message)); };
+    $("anomKind").onclick = (e) => {
+      const b = e.target.closest("button"); if (!b) return;
+      S.anomKind = b.dataset.k;
+      [...$("anomKind").children].forEach((x) => x.classList.toggle("on", x === b));
+      loadAnomalies().catch((x) => toast(x.message));
+    };
+    $("anomExclude").onclick = () => {
+      const n = $("anomNote");
+      n.classList.toggle("hidden");
+      n.textContent = S.anomNote || "Модель уже обучается с автоочисткой: аномальные дни исключаются из обучения.";
+    };
+    loadModelInfo();
+    initAssistant();
+  }
+  function setModel(m) {
+    if (m === "hybrid" && !S.ml.hybrid) return;
+    S.model = m;
+    [...$("modelSeg").children].forEach((b) => b.classList.toggle("on", b.dataset.m === m));
+    $("hybridToggle").checked = m === "hybrid";
+    $("modelBadge").textContent = m === "hybrid" ? "гибрид ML: структурная × LightGBM" : "структурная v08";
+    refresh();
+  }
+
+  async function loadAnomalies() {
+    const r = await api("/anomalies", { route: S.route, kind: S.anomKind || null }).catch(() => null);
+    const thead = $("anomTable").querySelector("thead"), tbody = $("anomTable").querySelector("tbody");
+    if (!r) return;
+    S.anomNote = r.training_note;
+    $("anomBadge").textContent = `история ${short(r.date_from)}.${r.date_from.slice(0, 4)} – ${short(r.date_to)}.${r.date_to.slice(0, 4)}`;
+    if (!r.available) {
+      $("anomSum").innerHTML = `<span class="muted">${esc(r.message)}. Раздел заполнится автоматически, когда ML-пайплайн выгрузит разметку.</span>`;
+      $("anomKind").classList.add("hidden");
+      thead.innerHTML = ""; tbody.innerHTML = "";
+      return;
+    }
+    $("anomKind").classList.remove("hidden");
+    const who = S.route === "all" ? "по всем маршрутам" : `на маршруте № ${S.route}`;
+    $("anomSum").innerHTML = `<span><b>${fmt(r.count)}</b> ${r.count % 10 === 1 && r.count % 100 !== 11 ? "аномальный день" : "аномальных дней"} ${who}</span>`
+      + Object.entries(r.by_kind).map(([k, n]) => `<span><i class="dot ${k}"></i>${esc(r.kinds[k] || k)}: ${n}</span>`).join("");
+    thead.innerHTML = `<tr><th>Дата</th><th>Маршрут</th><th>Тип</th><th>Причина (метка детектора)</th><th class="num">Факт, пасс.</th><th class="num">Типичный день</th><th class="num">Отклонение</th><th class="num">Оценка</th></tr>`;
+    const ev = r.events.slice().sort((x, y) => (x.date < y.date ? 1 : -1)).slice(0, 300);
+    tbody.innerHTML = ev.length ? ev.map((e) => `<tr data-d="${e.date}" data-r="${esc(e.route)}"><td>${human(e.date)}</td><td>№ ${esc(e.route)}</td>
+      <td><span class="tag ${esc(e.kind)}">${esc(e.kind_ru)}</span></td><td class="lbl">${esc(e.label)}</td>
+      <td class="num">${fmt(e.actual_total)}</td><td class="num">${fmt(e.typical_total)}</td>
+      <td class="num">${e.deviation_pct === null ? "—" : sign(e.deviation_pct) + " %"}</td><td class="num">${String(e.score).replace(".", ",")}</td></tr>`).join("")
+      : `<tr><td colspan="8" class="muted">Аномалий этого типа нет</td></tr>`;
+    [...tbody.querySelectorAll("tr[data-d]")].forEach((tr) => (tr.onclick = () => {
+      const d = tr.dataset.d;
+      S.date = d; $("date").value = d; S.month = d.slice(0, 7); $("month").value = S.month;
+      if (S.route !== "all" && S.route !== tr.dataset.r) { S.route = tr.dataset.r; $("route").value = S.route; }
+      S.stop = null; S.horizon = "month";
+      [...$("horizon").children].forEach((x) => x.classList.toggle("on", x.dataset.h === "month"));
+      refresh();
+      $("lineChart").scrollIntoView({ behavior: "smooth", block: "center" });
+    }));
+  }
+
+  async function loadModelInfo() {
+    let m;
+    try { m = await api("/model"); } catch { return; }
+    $("modelDesc").innerHTML = m.description.map((p) => `<p>${esc(p)}</p>`).join("");
+    $("hybridNote").textContent = m.hybrid_available
+      ? (m.hybrid_weight_zero ? `Бустинг проверен на скользящем бэктесте и не улучшил точность: в финале вес 0, гибридный ряд — структурная база без ML-поправки${m.hybrid_compare && Math.abs(m.hybrid_compare.pct) >= 0.01 ? ` (${sign(m.hybrid_compare.pct)} % к отправленному v08)` : ""}. Переключатель показывает его на всех графиках, в выпуске и экспорте, а поправку ml_ratio — в объяснении прогноза.`
+        : m.hybrid_compare ? `Ноябрь–декабрь: гибрид ${sign(m.hybrid_compare.pct)} % к v08 (${fmt(m.hybrid_compare.hybrid_total)} против ${fmt(m.hybrid_compare.v08_total)} пасс.). Переключает прогноз на всех графиках, в выпуске и экспорте.` : "")
+      : "Появится после загрузки hybrid_nov_dec.csv (ML-пайплайн). Сейчас используется v08.";
+    S.hybridZero = !!m.hybrid_weight_zero;
+    const t = m.fold_table !== null && m.fold_table !== undefined ? m.tables[m.fold_table] : null;
+    const isNum = (v) => v.trim() === "—" || /^[-+−]?\d+([.,]\d+)?\s*%?$/.test(v.replace(/\*/g, "").trim());
+    const cell = (v) => esc(v).replace(/\*\*(.+?)\*\*/g, "<b>$1</b>").replace(/`(.+?)`/g, "<code>$1</code>");
+    const tableHtml = (t) => {
+      const numCol = t.header.map((_, j) => t.rows.length > 0 && t.rows.every((r) => r[j] === undefined || isNum(r[j])));
+      return `<table><thead><tr>${t.header.map((h, j) => `<th class="${numCol[j] ? "num" : ""}">${cell(h)}</th>`).join("")}</tr></thead><tbody>`
+        + t.rows.map((r) => `<tr>${r.map((v, j) => `<td class="${numCol[j] ? "num" : ""}">${cell(v)}</td>`).join("")}</tr>`).join("") + `</tbody></table>`;
+    };
+    const rest = m.tables.filter((_, i) => i !== m.fold_table);
+    $("modelMore").classList.toggle("hidden", !rest.length);
+    $("modelTables").innerHTML = rest.map((x) => `<div><h4>${esc(x.title || x.heading || "")}</h4><div class="table-wrap">${tableHtml(x)}</div></div>`).join("");
+    if (t) {
+      $("foldTitle").textContent = t.title || t.heading || "Качество по фолдам";
+      $("foldTable").innerHTML = tableHtml(t);
+    } else {
+      $("foldTable").innerHTML = `<p class="muted">Отчёт ML (REPORT.md) ещё не загружен: таблица метрик по фолдам появится после запуска scripts/prepare_data.py.</p>`;
+    }
+    $("modelSummary").textContent = [m.summary, m.interval_avg_width_pct ? `Средняя ширина 80 % интервала: ${String(m.interval_avg_width_pct).replace(".", ",")} % от прогноза.` : ""].filter(Boolean).join(" ");
+    $("modelSources").innerHTML = m.sources.map((x) => `<li><a href="${esc(x.url)}" target="_blank" rel="noopener">${esc(x.name)}</a><small>${esc(x.what)} → ${esc(x.used_in)}</small></li>`).join("");
+    $("modelFactors").innerHTML = m.factors.map((f) => `<li><b>${esc(f.name)}</b> <code>${esc(f.key)}</code><small>${esc(f.description)}</small></li>`).join("");
+  }
+
+  // ---------------- dispatcher assistant (rule-based, no LLM) ----------------
+  function addMsg(kind, html) {
+    const d = document.createElement("div");
+    d.className = `msg ${kind}`; d.innerHTML = html;
+    $("asstLog").appendChild(d); $("asstLog").scrollTop = $("asstLog").scrollHeight;
+    return d;
+  }
+  function initAssistant() {
+    const open = (v) => {
+      $("asst").classList.toggle("hidden", !v); $("asstBtn").setAttribute("aria-expanded", String(v));
+      if (v) { $("asstRef").textContent = `«сегодня» = выбранная дата, ${human(S.date)}`; $("asstQ").focus(); }
+    };
+    $("asstBtn").onclick = () => open($("asst").classList.contains("hidden"));
+    $("asstClose").onclick = () => open(false);
+    const ex = ["Где завтра переполнение?", "Сколько вагонов нужно на 17 маршруте в 8 утра?", "Когда час пик на 11 маршруте в пятницу?", "Какие аномалии были на маршруте 1 в мае?", "Как устроена модель?"];
+    $("asstEx").innerHTML = ex.map((q) => `<span class="chip">${esc(q)}</span>`).join("");
+    [...$("asstEx").children].forEach((c) => (c.onclick = () => ask(c.textContent)));
+    $("asstForm").onsubmit = (e) => { e.preventDefault(); const q = $("asstQ").value.trim(); if (q) ask(q); $("asstQ").value = ""; };
+    addMsg("a", "Отвечаю по данным сервиса: переполнение, вагоны, пассажиропоток, час пик, аномалии, модель. Укажите маршрут, дату и час.");
+  }
+  async function ask(q) {
+    $("asstEx").classList.add("hidden");
+    addMsg("q", esc(q));
+    try {
+      const r = await api("/assistant", { q, ref_date: S.date, plan_by: S.planP90 ? "p90" : null });
+      const d = addMsg("a", esc(r.answer) + (r.items.length ? `<ul>${r.items.map((i) => `<li>${esc(i)}</li>`).join("")}</ul>` : ""));
+      const act = r.action || {};
+      if (act.route || act.date || act.scroll) {
+        const b = document.createElement("button");
+        b.className = "btn small"; b.textContent = "Показать на дашборде";
+        b.onclick = () => applyAction(act);
+        d.appendChild(document.createElement("br")); d.appendChild(b);
+      }
+    } catch (e) { addMsg("a", esc(e.message)); }
+  }
+  function applyAction(act) {
+    let changed = false;
+    if (act.route && act.route !== S.route && (act.route === "all" || S.routes.some((x) => x.route === act.route))) {
+      S.route = act.route; $("route").value = act.route; S.stop = null; changed = true;
+    }
+    if (act.date && (act.date !== S.date || S.horizon !== "day")) {
+      S.date = act.date; $("date").value = act.date; S.horizon = "day";
+      [...$("horizon").children].forEach((x) => x.classList.toggle("on", x.dataset.h === "day")); changed = true;
+    }
+    if (act.hour !== null && act.hour !== undefined) { S.hour = act.hour; $("hour").value = act.hour; paintHour(); }
+    if (changed) refresh();
+    $(act.scroll || "lineChart")?.scrollIntoView({ behavior: "smooth", block: "start" });
   }
 
   function rerenderCharts() {
@@ -690,8 +934,8 @@
     const p = period();
     const gran = S.horizon === "day" ? "hour" : S.horizon === "month" ? "day" : "month";
     const q = S.horizon === "year"
-      ? new URLSearchParams({ format: fmtName, source: "scenario", route: S.route, ...adjParams() })
-      : new URLSearchParams({ format: fmtName, source: p.source, route: S.route, date_from: p.from, date_to: p.to, granularity: gran, ...hours(), ...adjParams() });
+      ? new URLSearchParams({ format: fmtName, source: "scenario", route: S.route, ...adjParams(), ...modelParams() })
+      : new URLSearchParams({ format: fmtName, source: p.source, route: S.route, date_from: p.from, date_to: p.to, granularity: gran, ...hours(), ...adjParams(), ...modelParams() });
     try {
       const r = await fetch(`${API}/export?${q}`);
       if (!r.ok) { const b = await r.json().catch(() => ({})); throw new Error(b?.error?.message || `Ошибка ${r.status}`); }

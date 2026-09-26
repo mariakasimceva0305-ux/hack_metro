@@ -14,7 +14,7 @@ from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse, ORJSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-from . import adjust, config, errors, metrics, queries, store
+from . import adjust, assistant, config, errors, metrics, queries, store
 from .errors import ApiError
 
 TAGS = [
@@ -22,6 +22,7 @@ TAGS = [
     {"name": "Прогноз", "description": "Прогноз пассажиропотока (ноябрь–декабрь 2025)"},
     {"name": "Факт", "description": "Фактический пассажиропоток (январь–октябрь 2025)"},
     {"name": "Аналитика", "description": "KPI, сценарий на год, объяснение прогноза"},
+    {"name": "ИИ / ML", "description": "Интервалы прогноза, ИИ-детектор аномалий, гибридная модель, помощник диспетчера"},
     {"name": "Экспорт", "description": "Выгрузка CSV / XLSX"},
     {"name": "Сервис", "description": "Здоровье и метрики"},
 ]
@@ -66,6 +67,7 @@ AdjDesc = {
     "w_floor": "Нижняя граница погодного множителя (модель: 0.9)",
     "w_scenario": "Сценарий погоды «дата:+мм[:температура]», несколько через «;», например 2025-12-10:10:-15",
     "k_event": "События «маршрут|all:с:по:множитель[:час-час]», несколько через «;», например 7:2025-12-01:2025-12-07:0",
+    "model": "Модель прогноза: v08 (структурная) или hybrid (структурная × поправка LightGBM, если загружен hybrid_nov_dec.csv)",
 }
 
 
@@ -80,8 +82,9 @@ def get_adj(k_level: str | None = Query(None, description=AdjDesc["k_level"], ex
             w_cold: float = Query(adjust.DEF_COLD, ge=-0.5, le=0.5, description=AdjDesc["w_cold"]),
             w_floor: float = Query(adjust.DEF_FLOOR, ge=0.3, le=1.0, description=AdjDesc["w_floor"]),
             w_scenario: str | None = Query(None, description=AdjDesc["w_scenario"]),
-            k_event: str | None = Query(None, description=AdjDesc["k_event"])) -> adjust.Adj:
-    return _parse_adj(k_level, k_special, w_precip, w_cold, w_floor, w_scenario, k_event)
+            k_event: str | None = Query(None, description=AdjDesc["k_event"]),
+            model: Literal["v08", "hybrid"] = Query("v08", description=AdjDesc["model"])) -> adjust.Adj:
+    return _parse_adj(k_level, k_special, w_precip, w_cold, w_floor, w_scenario, k_event, model)
 
 
 ADJ = Annotated[adjust.Adj, Depends(get_adj)]
@@ -96,7 +99,8 @@ def _cached(kind: str, *args) -> bytes:
         "series": queries.series_query, "stop": queries.stop_query, "routes": queries.routes_query,
         "stops": queries.stops_query, "map": queries.map_query, "kpi": queries.kpi_query,
         "year": queries.year_scenario, "explain": queries.explain_query, "fleet": queries.fleet_query,
-        "weather": queries.weather_query,
+        "weather": queries.weather_query, "anomalies": queries.anomalies_query, "model": queries.model_query,
+        "assistant": assistant.answer,
     }[kind]
     return orjson.dumps(fn(st, *args))
 
@@ -178,15 +182,37 @@ def fleet(adj: ADJ, route: str = RT, date: str | None = Query(None, description=
           layover: float = Query(10.0, ge=0, le=60, description="Отстой на конечных за оборот, мин"),
           max_headway: float = Query(20.0, ge=3, le=60, description="Максимальный интервал движения, мин"),
           plan: int | None = Query(None, ge=0, le=200, description="Плановый выпуск (вагонов в час), если известен"),
-          min_boardings: float = Query(30.0, ge=0, le=500, description="Порог входов в час, ниже которого регулярное движение не требуется")):
+          min_boardings: float = Query(30.0, ge=0, le=500, description="Порог входов в час, ниже которого регулярное движение не требуется"),
+          plan_by: Literal["p50", "p90"] = Query("p50", description="Планировать по медиане прогноза (p50) или по P90 (с запасом)")):
     return _cached_response("fleet", route, date, adj, capacity, round(load_target, 3), round(peak_share, 3),
                             round(turnover, 3), speed, round(layover, 1), round(max_headway, 1), plan,
-                            round(min_boardings, 1))
+                            round(min_boardings, 1), plan_by)
 
 
 @app.get("/api/v1/explain", tags=["Аналитика"], summary="Декомпозиция прогноза (base × множители)")
 def explain(route: str = Query(..., description="Номер маршрута"), date: str = Query(..., description="ГГГГ-ММ-ДД")):
     return _cached_response("explain", route, date)
+
+
+# ---------------- AI / ML ----------------
+@app.get("/api/v1/anomalies", tags=["ИИ / ML"], summary="ИИ-детектор аномалий: аномальные дни истории с причиной")
+def anomalies(route: str = RT, date_from: str | None = DF, date_to: str | None = DT,
+              kind: Literal["drop", "spike", "shape"] | None = Query(None, description="drop — провал, spike — всплеск, shape — аномальный профиль")):
+    return _cached_response("anomalies", route, date_from, date_to, kind)
+
+
+@app.get("/api/v1/model", tags=["ИИ / ML"], summary="Модель: гибрид, метрики по фолдам, внешние источники, факторы")
+def model_info():
+    return _cached_response("model")
+
+
+@app.get("/api/v1/assistant", tags=["ИИ / ML"], summary="Помощник диспетчера: ответ на вопрос по данным (правила, без LLM)")
+def assistant_q(adj: ADJ, q: str = Query("", max_length=300, description="Вопрос, например «сколько вагонов нужно на 17 маршруте в 8 утра?»"),
+                ref_date: str | None = Query(None, description="«Сегодня» для слов завтра/сегодня, ГГГГ-ММ-ДД (по умолчанию — начало прогноза)"),
+                plan_by: Literal["p50", "p90"] = "p50"):
+    st = store.get()
+    ref = queries.parse_date(ref_date, "ref_date") or st.coverage["forecast"][0]
+    return _cached_response("assistant", q.strip(), ref, adj, plan_by)
 
 
 @lru_cache(maxsize=1)
@@ -245,6 +271,7 @@ def export(adj: ADJ, format: Literal["csv", "xlsx"] = "csv",
     for i, (k, v) in enumerate([("Источник", source), ("Маршрут", route), ("Период", f"{date_from or ''} — {date_to or ''}"),
                                 ("Часы", f"{hour_from}–{hour_to}"), ("Гранулярность", granularity),
                                 ("Файл прогноза", st.forecast_path.split('/')[-1].split('\\')[-1]),
+                                ("Модель", "гибрид ML (структурная × LightGBM)" if adj.model == "hybrid" else "v08 (структурная)"),
                                 ("Коррекция", "; ".join(adj.describe()) if adj.active else "нет (прогноз модели)"),
                                 ("Сформировано", stamp)]):
         meta.write_row(i, 0, [k, v])
@@ -262,6 +289,9 @@ def health():
                   "forecast_file": st.forecast_path.replace("\\", "/").split("/")[-1],
                   "data_bundle": _meta(),
                   "explain_loaded": st.explain is not None,
+                  "ml": {"intervals": bool(st.ml and st.ml.intervals), "hybrid": bool(st.ml and st.ml.hybrid),
+                         "anomalies": len(st.ml.anomalies) if st.ml else 0,
+                         "report": bool(st.ml and st.ml.report_md), "errors": st.ml.errors if st.ml else []},
                   "coverage": {k: [str(v[0]), str(v[1])] for k, v in st.coverage.items()}})
 
 
