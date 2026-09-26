@@ -11,3 +11,11 @@
 - Tests: 21 pytest tests pass.
 - Docker: Docker Desktop 4.60 crashes at startup (stale `%LOCALAPPDATA%\Docker\run\dockerInference` socket, "file cannot be accessed by the system"). I did not touch host folders, so `docker compose up --build` could not be run here. Dockerfile and compose were reviewed. `scripts/bench_docker.ps1` is ready for a one-command container benchmark with docker stats.
 - Performance, 2-CPU affinity emulation on the host (2 workers): 3.3k RPS, p95 12.6 ms at 16 connections; 3.6k RPS, p95 45 ms at 64; 3.4k RPS, p95 189 ms at 256; RAM ≤ 460 MB. 4 workers were worse (p95 58 ms at 64 connections, 633 MB), so the default is WORKERS=2.
+
+Round 2 (judging criteria)
+- Data refreshed: final_candidate.csv v08 (LB 0.90167) + explain (weather_mult is now non-trivial) + daily weather (06–21 h aggregation, as in src/adjust.py) + fleet.json (vehicle class from «Наряд», speed from «Расписание», lengths from geometry).
+- Correction coefficients (`app/adjust.py`): k_level, k_special, w_precip, w_cold, w_floor, w_scenario, k_event. They work as API query params on forecast/series/stop/map/kpi/fleet/year/weather/export. Responses include `delta` (было → стало) and `baseline`. The defaults reproduce the model: recomputed weather matches the file within 5e-4.
+- Rolling stock `/fleet`: trams needed per hour, current supply estimated from the previous 4 weeks of actuals, risk/surplus statuses, Russian recommendations. The UI panel has editable assumptions.
+- Year = explicit «сценарный прогноз» for Jan–Dec 2026 with a ±band (default 10 % ≈ 1 − LB). Route 5 uses network seasonality. Month = daily totals.
+- UI: corrections panel, fleet panel, new month and year charts, export with corrections and a scenario export. Only the 10 target routes are shown.
+- Tests: 31 pass. Perf, 2 CPUs pinned, heavier mix: 2.7k RPS, p95 9.8 ms at 16 connections; 2.5k RPS, p95 37 ms at 64; 2.0k RPS, p95 274 ms at 256; RAM ≤ 484 MB. Docker Desktop is still broken on the dev machine.
