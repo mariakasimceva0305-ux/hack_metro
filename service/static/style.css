@@ -359,3 +359,6 @@ code { font-size: 11.5px; background: var(--surface-2); padding: 1px 5px; border
 @media (prefers-reduced-motion: reduce) { .chart, .card, .kpi, .btn { transition: none; } }
 .src small, .src a, .muted.small { overflow-wrap: anywhere; }
 #tInfo a, .qcard a { color: var(--link); }
+/* fix: example chips were squeezed to ~0 px as the log grew (flex-shrink) — only the log scrolls now */
+.asst-h, .asst-ex, .asst-form { flex: none; }
+.asst-log { min-height: 0; }
