@@ -142,6 +142,10 @@ curl "localhost:8000/api/v1/forecast?hour_from=abc"
 
 ## Dashboard
 
+### Visual system (Round 6, `docs/UI_PREMIUM_BRIEF.md`)
+
+Tokens in `static/style.css` (`:root` / `[data-theme=dark]`): ink `#0a0e1a` / paper `#f8f9fc`; **blue = data** (fact, map, links), **orange = action** (forecast, CTA, warnings, «Сценарий», the cat), red = overflow, green only for spare capacity. Onest for the UI and JetBrains Mono for KPI numerals. Spacing 4–48, radius 4/8/12/16, shadows sm/md/lg, transitions 150/250/400 ms, and a 300 ms colour transition when the theme changes. All text pairs are ≥ 4.5:1 in both themes, and all motion is off under `prefers-reduced-motion`. Components: sticky blurred header with icon buttons, KPI strip (the one bold element), ECharts theme (rounded tooltips, pale grid, clickable legend), blue → orange stop scale on the map, custom sliders and preset chips in the drawer, recommendation cards with «Применить», sortable tables, auto-closing toasts. The map uses keyless OSM tiles styled per theme: CartoDB basemaps now show an «API KEY REQUIRED» watermark without a key.
+
 ### Layout (Round 5, `docs/UI_PLAN.md`)
 
 App shell = header (brand, «Сценарий» button with a badge of active corrections, theme, assistant cat) + global filters (route, horizon, date, model, hours, export) + **5 views** with hash routing (no reload, back button works) + the floating «Помощник диспетчера».

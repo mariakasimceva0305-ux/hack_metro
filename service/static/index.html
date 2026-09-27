@@ -6,7 +6,10 @@
   <title>Трамвай: прогноз загрузки</title>
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%232a78d6'/><path d='M9 22h14M11 9h10v10H11zM14 6h4M12 25l-2 2M20 25l2 2' stroke='white' stroke-width='2' fill='none' stroke-linecap='round'/></svg>">
   <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <!-- fonts never block the first render (slow CDN → the system font is used until they arrive) -->
+  <link href="https://fonts.googleapis.com/css2?family=Onest:wght@400;500;600;700&family=JetBrains+Mono:wght@500;600&display=swap" rel="stylesheet" media="print" onload="this.media='all'">
+  <noscript><link href="https://fonts.googleapis.com/css2?family=Onest:wght@400;500;600;700&family=JetBrains+Mono:wght@500;600&display=swap" rel="stylesheet"></noscript>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.css">
   <link rel="stylesheet" href="/static/style.css">
 </head>
@@ -15,7 +18,7 @@
 <header class="topbar">
   <div class="brand">
     <div class="logo" aria-hidden="true">
-      <svg viewBox="0 0 32 32" width="28" height="28"><rect width="32" height="32" rx="7" fill="var(--series-1)"/><path d="M9 22h14M11 9h10v10H11zM14 6h4M12 25l-2 2M20 25l2 2" stroke="#fff" stroke-width="2" fill="none" stroke-linecap="round"/></svg>
+      <svg viewBox="0 0 32 32" width="28" height="28"><rect width="32" height="32" rx="8" fill="var(--accent-strong)"/><path d="M9 22h14M11 9h10v10H11zM14 6h4M12 25l-2 2M20 25l2 2" stroke="var(--on-primary)" stroke-width="2" fill="none" stroke-linecap="round"/></svg>
     </div>
     <div>
       <h1>Прогноз загрузки трамвайных маршрутов</h1>
@@ -25,8 +28,8 @@
   <nav class="links">
     <button class="btn scn-btn" id="scnBtn" aria-controls="drawer" aria-expanded="false" title="Корректирующие коэффициенты: что будет, если…"><svg class="ico-sm" viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h10M18 6h2M4 12h4M12 12h8M4 18h12M20 18h0"/><circle cx="16" cy="6" r="2"/><circle cx="10" cy="12" r="2"/><circle cx="18" cy="18" r="2"/></svg><span>Сценарий</span><b class="scn-badge" id="scnBadge" hidden>0</b></button>
     <button class="btn filt-btn" id="filtBtn" aria-controls="filters" aria-expanded="false"><svg class="ico-sm" viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 5h18l-7 8v6l-4-2v-4L3 5z"/></svg><span>Фильтры</span></button>
-    <a href="/docs" target="_blank" rel="noopener">Документация API</a>
-    <button id="themeBtn" class="ghost" title="Переключить тему">◐</button>
+    <a class="icon-btn" href="/docs" target="_blank" rel="noopener" aria-label="Документация API (Swagger)" data-tip="Документация API"><svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M8 7l-5 5 5 5M16 7l5 5-5 5M13.5 4l-3 16"/></svg></a>
+    <button id="themeBtn" class="icon-btn theme-btn" aria-label="Переключить тему" data-tip="Светлая / тёмная тема"><svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><g class="sun"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></g><path class="moon" d="M20 14.5A8 8 0 0 1 9.5 4 7 7 0 1 0 20 14.5z"/></svg></button>
     <button class="cat-head" id="catHead" title="Помощник диспетчера" aria-label="Открыть помощника диспетчера"><img src="/static/img/cat_sitting.png" alt="" width="28" height="31"></button>
   </nav>
 </header>
@@ -97,11 +100,11 @@
   <section class="view active" id="view-overview" role="tabpanel" aria-labelledby="tab-overview" tabindex="-1">
     <div class="view-h"><h2 class="view-title">Обзор</h2><p class="view-sub">Где и когда будет тесно: KPI, карта, часы риска</p></div>
     <section class="kpis" id="kpis">
-  <div class="kpi"><div class="k-label">Пиковый час</div><div class="k-val" id="kPeak">—</div><div class="k-sub" id="kPeakSub"></div></div>
-  <div class="kpi"><div class="k-label">Макс. загрузка за час</div><div class="k-val" id="kMax">—</div><div class="k-sub" id="kMaxSub"></div></div>
-  <div class="kpi"><div class="k-label" id="kTotalLabel">Пассажиров за период</div><div class="k-val" id="kTotal">—</div><div class="k-sub" id="kTotalSub"></div></div>
-  <div class="kpi"><div class="k-label">Изменение к прошлому месяцу</div><div class="k-val" id="kChange">—</div><div class="k-sub" id="kChangeSub"></div></div>
-  <div class="kpi" id="kOverBox" title="P(пассажиров за час больше вместимости текущего выпуска) по интервалам прогноза P10–P90"><div class="k-label" id="kOverLabel">Вероятность переполнения</div><div class="k-val" id="kOver">—</div><div class="k-sub" id="kOverSub"></div></div>
+  <div class="kpi" data-accent="blue"><svg class="k-ico" viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg><div class="k-label">Пиковый час</div><div class="k-val" id="kPeak">—</div><div class="k-sub" id="kPeakSub"></div></div>
+  <div class="kpi" data-accent="blue"><svg class="k-ico" viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 17l6-6 4 4 8-8"/><path d="M15 7h6v6"/></svg><div class="k-label">Макс. загрузка за час</div><div class="k-val" id="kMax">—</div><div class="k-sub" id="kMaxSub"></div></div>
+  <div class="kpi" data-accent="blue"><svg class="k-ico" viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="3.5"/><path d="M2.5 20a6.5 6.5 0 0 1 13 0"/><path d="M16 4.5a3.5 3.5 0 0 1 0 7M18 14a6 6 0 0 1 3.5 6"/></svg><div class="k-label" id="kTotalLabel">Пассажиров за период</div><div class="k-val" id="kTotal">—</div><div class="k-sub" id="kTotalSub"></div></div>
+  <div class="kpi" data-accent="blue"><svg class="k-ico" viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M7 17L17 7M9 7h8v8"/></svg><div class="k-label">Изменение к прошлому месяцу</div><div class="k-val" id="kChange">—</div><div class="k-sub" id="kChangeSub"></div></div>
+  <div class="kpi" data-accent="orange" id="kOverBox" title="P(пассажиров за час больше вместимости текущего выпуска) по интервалам прогноза P10–P90"><svg class="k-ico" viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l10 18H2L12 3z"/><path d="M12 10v5M12 18v.5"/></svg><div class="k-label" id="kOverLabel">Вероятность переполнения</div><div class="k-val" id="kOver">—</div><div class="k-sub" id="kOverSub"></div></div>
 </section>
     <div class="ov-grid">
       <section class="card map-card">
@@ -153,7 +156,7 @@
     <div class="view-h"><h2 class="view-title">Выпуск</h2><p class="view-sub">Сколько вагонов нужно по часам и где добавить или снять</p></div>
     <section class="card wide" id="fleetCard">
     <div class="card-h">
-      <div class="card-t"><svg class="ico-sm" viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="4" width="14" height="13" rx="3"/><path d="M5 11h14M9 20l-2 2M15 20l2 2M8 17v3M16 17v3"/></svg><h2 id="fleetTitle">Выпуск подвижного состава</h2><p class="card-sub">Требуемые вагоны по часам против текущего выпуска: красное — риск давки, зелёное — резерв</p></div>
+      <div class="card-t"><svg class="ico-sm" viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="4" width="14" height="13" rx="3"/><path d="M5 11h14M9 20l-2 2M15 20l2 2M8 17v3M16 17v3"/></svg><h2 id="fleetTitle">Выпуск подвижного состава</h2><p class="card-sub">Сколько вагонов нужно по часам и сколько выходит сейчас: синее — хватает, оранжевое — добавить, красное — переполнение</p></div>
       <span class="badge" id="fleetBadge"></span>
     </div>
     <div class="fleet-params">
@@ -333,7 +336,7 @@
   <div class="asst-log" id="asstLog" aria-live="polite"></div>
   <div class="chips asst-ex" id="asstEx"></div>
   <form class="asst-form" id="asstForm">
-    <input type="text" id="asstQ" maxlength="300" placeholder="Например: сколько вагонов нужно на 17 маршруте в 8 утра?" autocomplete="off">
+    <input type="text" id="asstQ" maxlength="300" placeholder="Спросите что-нибудь…" aria-label="Вопрос помощнику, например: сколько вагонов нужно на 17 маршруте в 8 утра?" autocomplete="off">
     <button class="btn" type="submit">Спросить</button>
   </form>
 </section>

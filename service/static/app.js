@@ -58,10 +58,17 @@
     p.catch(() => cache.delete(url));
     return p;
   }
+  // toasts: top-right, close button, auto-close after 6 s (errors stay readable, never block the page)
+  let toastTimer = null;
   function toast(msg) {
     const t = $("toast");
+    clearTimeout(toastTimer);
     if (!msg) { t.classList.add("hidden"); return; }
-    t.textContent = msg; t.classList.remove("hidden");
+    t.innerHTML = `<svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 8v5M12 16v.5"/></svg><span></span><button class="toast-x" aria-label="Закрыть уведомление">✕</button>`;
+    t.querySelector("span").textContent = msg;
+    t.querySelector(".toast-x").onclick = () => t.classList.add("hidden");
+    t.classList.remove("hidden");
+    toastTimer = setTimeout(() => t.classList.add("hidden"), 6000);
   }
 
   // ---------------- period helpers ----------------
@@ -145,7 +152,10 @@
     $("themeBtn").onclick = () => {
       const dark = isDark();
       const t = dark ? "light" : "dark";
+      const root = document.documentElement;  // 300 ms colour transition only while the theme switches
+      root.classList.add("theme-switching");
       localStorageSet("theme", t); applyTheme(t); rerenderCharts();
+      setTimeout(() => root.classList.remove("theme-switching"), 350);
     };
     window.addEventListener("resize", () => Object.values(charts).forEach((c) => c && c.resize()));
     matchMedia("(prefers-color-scheme: dark)").addEventListener?.("change", () => { applyTheme(localStorageGet("theme")); rerenderCharts(); });
@@ -159,8 +169,9 @@
   }
   function applyTheme(t) {
     if (t === "light" || t === "dark") document.documentElement.dataset.theme = t;
-    const tiles = document.querySelector(".leaflet-tile-pane");
-    if (tiles) tiles.style.filter = isDark() ? "invert(1) hue-rotate(180deg) brightness(.9) contrast(.9) saturate(.5)" : "saturate(.6)";
+    document.documentElement.classList.toggle("is-dark", isDark());  // drives the sun/moon toggle and map tiles
+    // CartoDB basemaps follow the theme: Dark Matter in dark, Positron in light (no CSS filter hacks)
+    if (S.tiles) S.tiles.setUrl(tileUrl());
   }
 
   // ---------------- refresh ----------------
@@ -291,7 +302,9 @@
       a.scn = a.scn.filter((x) => x.date !== d).concat([{ date: d, mm, t }]);
       adjChanged(true);
     };
-    document.querySelectorAll(".ghost-btn[data-k]").forEach((b) => (b.onclick = () => { $("eK").value = b.dataset.k; }));
+    document.querySelectorAll(".ghost-btn[data-k]").forEach((b) => (b.onclick = () => { $("eK").value = b.dataset.k; paintAdjControls(); }));
+    $("eK").addEventListener("input", paintAdjControls);
+    document.querySelectorAll("#adjCard input[type=range]").forEach((r) => r.addEventListener("input", paintAdjControls));
     $("eAdd").onclick = () => {
       const from = $("eFrom").value, to = $("eTo").value, k = Number($("eK").value), h0 = +$("eH0").value, h1 = +$("eH1").value;
       if (!from || !to || to < from) { toast("Событие: дата окончания раньше даты начала"); return; }
@@ -359,6 +372,7 @@
     $("adjCount").textContent = n ? `активно: ${n}` : "не заданы";
     $("adjCount").classList.toggle("on", n > 0);
     renderScenarioBadge(n);
+    paintAdjControls();
     const q = new URLSearchParams(adjParams()).toString();
     $("adjApi").textContent = q ? `/api/v1/forecast?route=${S.route}&…&${decodeURIComponent(q)}` : "параметры не заданы (прогноз модели)";
     if (!adjActive()) $("adjDelta").innerHTML = `<span class="muted">прогноз модели без коррекции</span>`;
@@ -371,7 +385,36 @@
       return;
     }
     const d = k.delta, cls = d.pct > 0 ? "pos" : d.pct < 0 ? "neg" : "";
-    $("adjDelta").innerHTML = `было <b>${fmt(d.total_before)}</b> → стало <b>${fmt(d.total_after)}</b> <b class="${cls}">(${sign(d.pct)} %)</b> <span class="muted">пасс. за выбранный период</span>`;
+    const prev = S.lastDelta || d;
+    $("adjDelta").innerHTML = `было <b>${fmt(d.total_before)}</b> → стало <b class="count" data-from="${prev.total_after}" data-to="${d.total_after}">${fmt(d.total_after)}</b> <b class="${cls}">(${sign(d.pct)} %)</b> <span class="muted">пасс. за выбранный период</span>`;
+    S.lastDelta = d;
+    countUp($("adjDelta").querySelector(".count"));
+  }
+  /** «было → стало»: the new total counts from the previous one (≈ 400 ms, off under reduced motion). */
+  function countUp(el) {
+    const a = +el.dataset.from, b = +el.dataset.to;
+    if (!Number.isFinite(a) || a === b || matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+    const t0 = performance.now(), dur = 420;
+    const step = (t) => {
+      const k = Math.min(1, (t - t0) / dur), e = 1 - Math.pow(1 - k, 3);
+      el.textContent = fmt(a + (b - a) * e);
+      if (k < 1 && el.isConnected) requestAnimationFrame(step); else el.textContent = fmt(b);
+    };
+    requestAnimationFrame(step);
+  }
+  /** Drawer polish: range fill (blue track up to the orange thumb) and orange highlight on values changed from the model. */
+  const ADJ_DEFAULTS = { kLevel: 1, kSpecial: 1, wPrecip: -1.1, wCold: -3.4, wFloor: 0.9, tEffect: 0.7 };
+  function paintAdjControls() {
+    document.querySelectorAll("#adjCard input[type=range]").forEach((r) => {
+      const p = ((+r.value - +r.min) / ((+r.max - +r.min) || 1)) * 100;
+      r.style.setProperty("--fill", `${p}%`);
+    });
+    for (const [id, def] of Object.entries(ADJ_DEFAULTS)) {
+      const el = $(id);
+      if (el) el.classList.toggle("changed", Math.abs(+el.value - def) > 1e-9);
+    }
+    const k = String($("eK")?.value);
+    document.querySelectorAll(".ghost-btn[data-k]").forEach((b) => b.classList.toggle("on", b.dataset.k === k));
   }
   async function loadTrafficInfo() {
     // follows the dashboard date (forecast days) until the dispatcher picks another date in the traffic group
@@ -398,10 +441,15 @@
 
   // ---------------- Map ----------------
   let layerLines, layerStops, mapData = null, markers = [];
+  // Basemap: CartoDB Positron / Dark Matter now serve an «API KEY REQUIRED» watermark without a key, so the keyless
+  // OSM tiles are used and styled per theme in CSS (a Positron-like grey in light, a Dark-Matter-like navy in dark).
+  const tileUrl = () => "https://tile.openstreetmap.org/{z}/{x}/{y}.png";
   function initMap() {
-    S.map = L.map("map", { zoomControl: true, preferCanvas: true, scrollWheelZoom: false }).setView([55.765, 37.64], 11);
-    L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
-      maxZoom: 18, attribution: "&copy; участники OpenStreetMap",
+    // SVG renderer (≈350 stops): stop colour and size animate smoothly on hour change via CSS transitions
+    S.map = L.map("map", { zoomControl: true, preferCanvas: false, scrollWheelZoom: false }).setView([55.765, 37.64], 11);
+    S.tiles = L.tileLayer(tileUrl(), {
+      maxZoom: 19, className: "basemap",
+      attribution: '&copy; участники <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
     }).addTo(S.map);
     layerLines = L.layerGroup().addTo(S.map);
     layerStops = L.layerGroup().addTo(S.map);
@@ -432,7 +480,7 @@
     if (v === null || v === undefined) return css("--route-line");
     const c = seqColors();
     const t = max > 0 ? Math.min(1, v / max) : 0;
-    return c[Math.min(c.length - 1, Math.floor(Math.sqrt(t) * (c.length - 0.001)))];
+    return c[Math.min(c.length - 1, Math.floor(t * (c.length - 0.001)))];
   }
   async function loadMap() {
     const d = S.date; // map is always a one-day, hourly snapshot
@@ -463,7 +511,7 @@
       }
     }
     for (const s of data.stops) {
-      const m = L.circleMarker([s.lat, s.lon], { radius: 4, weight: 1.5, color: css("--surface-1"), fillOpacity: 0.9 });
+      const m = L.circleMarker([s.lat, s.lon], { radius: 4, weight: 1.5, color: css("--surface-1"), fillOpacity: 0.9, className: "stop-dot" });
       m.on("click", () => openStop(s, m));
       m.bindTooltip("", { direction: "top", offset: [0, -4] });
       m.addTo(layerStops);
@@ -476,7 +524,7 @@
   function paintLegend(max) {
     const c = seqColors();
     $("legend").innerHTML = max > 0
-      ? `пассажиров в час на остановке<div class="ramp">${c.map((x) => `<i style="background:${x}"></i>`).join("")}</div><div class="ends"><span>0</span><span>${fmt(max)}</span></div>`
+      ? `пасс./час на остановке<div class="ramp" style="background:linear-gradient(90deg, ${c.join(", ")})"></div><div class="ends"><span>0</span><span>${fmt(max)}</span></div>`
       : `нет данных для раскраски`;
   }
   function paintHour() {
@@ -565,13 +613,19 @@
   function baseOpt() {
     const t2 = css("--text-secondary"), grid = css("--grid");
     return {
-      textStyle: { fontFamily: "Inter, system-ui, sans-serif", color: t2 },
+      textStyle: { fontFamily: "Onest, system-ui, sans-serif", color: t2 },
       animationDuration: 450, animationDurationUpdate: 350, animationEasing: "cubicOut", animationEasingUpdate: "cubicOut",
       grid: { left: 56, right: 18, top: 36, bottom: 44 },
-      tooltip: { trigger: "axis", backgroundColor: css("--surface-1"), borderColor: css("--border"), textStyle: { color: css("--text-primary") },
+      // Round 6 chart theme: rounded tooltip with shadow, pale dashed grid, clickable legend (hover highlights a series)
+      tooltip: { trigger: "axis", backgroundColor: css("--surface-raised"), borderColor: css("--border"), borderWidth: 1, padding: [8, 12],
+        textStyle: { color: css("--text-primary"), fontFamily: "Onest, system-ui, sans-serif", fontSize: 12.5 },
+        extraCssText: `border-radius:12px;box-shadow:${css("--sh-md")};`,
+        axisPointer: { type: "line", lineStyle: { color: css("--border-strong"), width: 1 } },
         valueFormatter: (v) => (v === null || v === undefined ? "—" : fmt(v)) },
-      legend: { top: 0, left: 0, textStyle: { color: t2 }, itemWidth: 16, itemHeight: 8, itemGap: 22 },
-      yAxis: { type: "value", splitLine: { lineStyle: { color: grid } }, axisLabel: { color: t2, formatter: (v) => fmt(v) } },
+      legend: { top: 0, left: 0, textStyle: { color: t2 }, itemWidth: 14, itemHeight: 8, itemGap: 20, icon: "roundRect",
+        inactiveColor: css("--border-strong"), selectedMode: true },
+      emphasis: { focus: "series" },
+      yAxis: { type: "value", splitLine: { lineStyle: { color: grid, type: [4, 4] } }, axisLabel: { color: t2, formatter: (v) => fmt(v) } },
     };
   }
   const xAxis = (data, extra = {}) => ({ type: "category", data, axisLine: { lineStyle: { color: css("--border") } }, axisTick: { show: false }, axisLabel: { color: css("--text-secondary") }, ...extra });
@@ -716,7 +770,7 @@
     const max = vals.length ? Math.max(...vals) : 1;
     const t2 = css("--text-secondary");
     const opt = {
-      textStyle: { fontFamily: "Inter, system-ui, sans-serif", color: t2 },
+      textStyle: { fontFamily: "Onest, system-ui, sans-serif", color: t2 },
       tooltip: { backgroundColor: css("--surface-1"), borderColor: css("--border"), textStyle: { color: css("--text-primary") },
         formatter: (p) => `${rows[p.value[1]]}, ${pad(cols[p.value[0]])}:00<br><b>${fmt(p.value[2])}</b> пасс.` },
       grid: { left: 78, right: 20, top: 10, bottom: 70 },
@@ -812,8 +866,10 @@
     $("fleetBadge").textContent = `${r.source === "history" ? "по факту" : r.adjusted ? "по прогнозу с коррекцией" : "по прогнозу"} · ${short(d)}`;
     const one = r.routes.length === 1 ? r.routes[0] : null;
     const rows = one ? one.hours : r.total_hours.map((h) => ({ ...h, status: h.required > h.plan ? "risk" : h.required < h.plan ? "surplus" : h.required ? "ok" : "none" }));
-    const cRisk = css("--bad"), cOk = css("--series-1"), cSur = css("--good"), cPlan = css("--text-secondary");
-    const colorOf = (st) => (st === "risk" ? cRisk : st === "surplus" ? cSur : cOk);
+    // Round 6 fleet palette: blue = enough trams, orange = add trams, red = overflow likely (P ≥ 50 % or load ≥ 125 % of target)
+    const cOver = css("--danger"), cRisk = css("--accent"), cOk = css("--primary"), cSur = css("--seq-2"), cPlan = css("--text-secondary");
+    const colorOf = (st, x) => ((x && ((x.p_overflow ?? 0) >= 0.5 || (x.load_at_plan_pct ?? 0) >= 125)) ? cOver
+      : st === "risk" ? cRisk : st === "surplus" ? cSur : cOk);
     const hrs = rows.map((x) => `${pad(x.hour)}`);
     const hasP = r.overflow && r.overflow.available;
     const opt = {
@@ -823,27 +879,36 @@
       grid: { left: 44, right: hasP ? 46 : 12, top: 36, bottom: 30 },
       yAxis: hasP ? [baseOpt().yAxis, { type: "value", min: 0, max: 100, splitLine: { show: false }, axisLabel: { color: css("--text-secondary"), formatter: "{value} %" } }] : baseOpt().yAxis,
       series: [
-        { name: "Требуется вагонов на линии", type: "bar", barWidth: "60%", data: rows.map((x) => ({ value: x.required, itemStyle: { color: colorOf(x.status), borderRadius: [4, 4, 0, 0] } })), itemStyle: { color: cOk } },
-        { name: one && one.plan_source.startsWith("нет истории") ? "Текущий выпуск (нет данных)" : "Текущий выпуск (оценка по факту 4 недель)", type: "line", step: "middle", data: rows.map((x) => x.plan), showSymbol: false, lineStyle: { color: cPlan, width: 2, type: "dashed" }, itemStyle: { color: cPlan } },
+        { name: "Требуется вагонов на линии", type: "bar", barWidth: "60%", data: rows.map((x) => ({ value: x.required, itemStyle: { color: colorOf(x.status, x), borderRadius: [5, 5, 0, 0] } })), itemStyle: { color: cOk } },
+        { name: one && one.plan_source.startsWith("нет истории") ? "Текущий выпуск (нет данных)" : "Текущий выпуск (оценка по факту 4 недель)", type: "line", step: "middle", data: rows.map((x) => x.plan), showSymbol: false, lineStyle: { color: cPlan, width: 2, type: [6, 5], dashOffset: 0 }, itemStyle: { color: cPlan }, z: 4 },
       ],
     };
     if (hasP) opt.series.push({ name: "Вероятность переполнения, %", type: "line", yAxisIndex: 1, smooth: true, showSymbol: false,
       data: rows.map((x) => (x.p_overflow === null || x.p_overflow === undefined ? null : Math.round(x.p_overflow * 100))),
-      lineStyle: { color: css("--series-2"), width: 2 }, itemStyle: { color: css("--series-2") },
+      lineStyle: { color: cOver, width: 2 }, itemStyle: { color: cOver },
       tooltip: { valueFormatter: (v) => (v === null || v === undefined ? "—" : `${v} %`) } });
     chart("fleetChart", "fleet").setOption(opt, true);
+    animateSupplyLine();
     const recs = r.recommendations;
     const tag = { risk: ["risk", "риск давки"], surplus: ["surplus", "резерв"], info: ["info", "новый"] };
+    // Round 6: recommendation cards (coloured stripe, icon, «Применить» = show that route and hour on «Обзор»)
+    const recIcon = { risk: '<path d="M12 5v14M5 12h14"/>', surplus: '<path d="M5 12h14"/>', info: '<circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8v.5"/>' };
     $("fleetRecs").innerHTML = recs.length
-      ? recs.slice(0, 14).map((x) => `<li><span class="tag ${tag[x.type][0]}">${tag[x.type][1]}</span><span>${esc(x.text)}</span></li>`).join("")
-      : `<li><span class="tag info">норма</span><span>Выпуск соответствует прогнозу: изменений не требуется.</span></li>`;
+      ? recs.slice(0, 14).map((x, i) => `<li class="rec ${tag[x.type][0]}"><span class="rec-ico" aria-hidden="true"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round">${recIcon[x.type] || recIcon.info}</svg></span>
+          <span class="rec-body"><span class="tag ${tag[x.type][0]}">${tag[x.type][1]}</span><span>${esc(x.text)}</span></span>
+          ${x.route ? `<button class="btn small rec-apply" data-i="${i}" title="Открыть маршрут № ${esc(x.route)}${x.from !== null ? ` и ${pad(x.from)}:00` : ""} на «Обзоре»">Применить</button>` : ""}</li>`).join("")
+      : `<li class="rec info"><span class="rec-ico" aria-hidden="true"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M5 12l5 5 9-10"/></svg></span><span class="rec-body"><span class="tag info">норма</span><span>Выпуск соответствует прогнозу: изменений не требуется.</span></span></li>`;
+    [...$("fleetRecs").querySelectorAll(".rec-apply")].forEach((b) => (b.onclick = () => {
+      const x = recs[+b.dataset.i];
+      applyQuery({ route: x.route, date_from: r.date, date_to: r.date, hour_ranges: x.from !== null ? [[x.from, x.to]] : [], corrections: {} }, null);
+    }));
     const a = r.assumptions;
     $("fleetTitle").textContent = `Выпуск подвижного состава: ${S.route === "all" ? "все маршруты" : "маршрут № " + S.route}`;
     $("fleetHint").textContent = (one ? `Маршрут ${one.route}: длина ${String(one.length_km).replace(".", ",")} км (${one.length_source}), оборот ${fmt(one.round_trip_min)} мин, `
       + `${one.vehicle_model}, вместимость ${one.capacity} пасс., ${String(one.passengers_per_vehicle_per_hour).replace(".", ",")} пасс./ч на вагон при целевой загрузке. ` : "")
-      + `Формула: ${a.formula}. Скорость ${String(a.speed_kmh).replace(".", ",")} км/ч (${a.speed_source}). Красный — риск переполнения (нужно больше вагонов, чем в текущем выпуске), зелёный — резерв вместимости. `
+      + `Формула: ${a.formula}. Скорость ${String(a.speed_kmh).replace(".", ",")} км/ч (${a.speed_source}). Синий — вагонов хватает (светлее — резерв), оранжевый — нужно добавить вагоны, красный — вероятно переполнение (P ≥ 50 % или загрузка ≥ 125 % целевой). `
       + `Текущий выпуск оценён по фактическому спросу 4 предыдущих недель (тот же день недели), т. к. фактических нарядов по часам в данных нет.`
-      + (hasP ? ` Оранжевая линия — вероятность переполнения: ${r.overflow.method}.` : "")
+      + (hasP ? ` Красная линия — вероятность переполнения: ${r.overflow.method}.` : "")
       + (r.plan_by === "p90" ? " Потребность посчитана по P90 — с запасом на верхнюю границу прогноза." : "");
   }
 
@@ -1037,7 +1102,17 @@
       const r = await apiPost("/assistant/query", { text, ref_date: S.date, plan_by: S.planP90 ? "p90" : "p50", ...(edited ? { query: edited } : {}) });
       wait.remove();
       const d = addMsg("a", esc(r.answer) + (r.items.length ? `<ul>${r.items.map((i) => `<li>${esc(i)}</li>`).join("")}</ul>` : ""));
-      if (r.intent !== "help" && r.intent !== "model") d.appendChild(queryCard(text, r));
+      if (r.intent !== "help" && r.intent !== "model") {
+        d.appendChild(queryCard(text, r));
+        // answer actions: show the answer on the map («Обзор») or export exactly those parameters
+        const acts = document.createElement("div");
+        acts.className = "ans-acts";
+        acts.innerHTML = `<button class="btn small" data-a="map"><svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 4L3 6v14l6-2 6 2 6-2V4l-6 2-6-2zM9 4v14M15 6v14"/></svg>Показать на карте</button>
+          <button class="btn small" data-a="csv"><svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v11M7 10l5 5 5-5M5 20h14"/></svg>Экспорт</button>`;
+        acts.querySelector("[data-a=map]").onclick = () => { applyQuery(r.query, r.action); reveal("map"); };
+        acts.querySelector("[data-a=csv]").onclick = () => { applyQuery(r.query, r.action); setTimeout(() => doExport("csv"), 300); };
+        d.appendChild(acts);
+      }
     } catch (e) { wait.remove(); addMsg("a", esc(e.message)); }
   }
   /** Recognised parameters as chips + an inline editor: «Применить» (to the dashboard) / «Изменить» (re-ask). */
@@ -1175,7 +1250,30 @@
     if (open) setTimeout(() => focusables($("filters"))[1]?.focus(), 30);
     else $("filtBtn").focus();
   }
+  /** Sortable tables: click (or Enter on) a header → sort by that column; aria-sort drives the arrow. */
+  function initTableSort() {
+    const num = (t) => { const v = parseFloat(String(t).replace(/[\s  %+]/g, "").replace("−", "-").replace(",", ".")); return Number.isFinite(v) ? v : null; };
+    for (const id of ["routeTable", "anomTable"]) {
+      const table = $(id);
+      table.addEventListener("click", (e) => {
+        const th = e.target.closest("th");
+        if (!th || !table.tHead.contains(th)) return;
+        const idx = [...th.parentElement.children].indexOf(th);
+        const dir = th.getAttribute("aria-sort") === "ascending" ? "descending" : "ascending";
+        [...th.parentElement.children].forEach((x) => x.removeAttribute("aria-sort"));
+        th.setAttribute("aria-sort", dir);
+        const rows = [...table.tBodies[0].rows];
+        const key = (tr) => { const c = tr.cells[idx]; if (!c) return ""; if (idx === 0 && tr.dataset.d) return tr.dataset.d; const n = num(c.textContent); return n === null ? c.textContent.trim().toLowerCase() : n; };
+        rows.sort((a, b) => { const x = key(a), y = key(b); const r = typeof x === "number" && typeof y === "number" ? x - y : String(x).localeCompare(String(y), "ru"); return dir === "ascending" ? r : -r; });
+        rows.forEach((tr) => table.tBodies[0].appendChild(tr));
+      });
+      table.addEventListener("keydown", (e) => { if ((e.key === "Enter" || e.key === " ") && e.target.matches("th")) { e.preventDefault(); e.target.click(); } });
+      new MutationObserver(() => table.querySelectorAll("thead th").forEach((th) => { th.tabIndex = 0; th.classList.add("sortable"); }))
+        .observe(table.tHead, { childList: true, subtree: true });
+    }
+  }
   function initShell() {
+    initTableSort();
     const nav = $("viewnav");
     nav.addEventListener("click", (e) => { const b = e.target.closest("[data-view]"); if (b) go(b.dataset.view); });
     nav.addEventListener("keydown", (e) => {  // roving tabindex: ← → ↑ ↓ Home End
@@ -1207,8 +1305,9 @@
       }
     });
     // the sidebar / top tabs stick right under the sticky filter bar, whatever its wrapped height
-    const setFH = () => document.documentElement.style.setProperty("--filters-h", `${$("filters").offsetHeight || 0}px`);
-    if (window.ResizeObserver) new ResizeObserver(setFH).observe($("filters")); else setFH();
+    // the sidebar / top tabs stick right under the sticky header (Round 6: the filters scroll away)
+    const setFH = () => document.documentElement.style.setProperty("--filters-h", `${document.querySelector(".topbar").offsetHeight || 0}px`);
+    if (window.ResizeObserver) new ResizeObserver(setFH).observe(document.querySelector(".topbar")); else setFH();
     go(location.hash.slice(1) || "overview", { push: false });
   }
   /** Header badge «Сценарий: N» mirrors the corrections counter; the button tooltip shows «было → стало». */
@@ -1249,6 +1348,18 @@
     }));
   }
 
+  /** «Текущий выпуск» dashed line drifts slowly while the fleet chart is on screen (off under reduced motion). */
+  let dashTimer = null;
+  function animateSupplyLine() {
+    if (dashTimer || matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+    let off = 0;
+    dashTimer = setInterval(() => {
+      const c = charts.fleet;
+      if (!c || c.isDisposed() || !$("fleetChart").offsetParent || document.hidden) return;
+      off = (off + 1) % 11;
+      c.setOption({ series: [{}, { lineStyle: { dashOffset: -off } }] }, { lazyUpdate: true, silent: true });
+    }, 90);
+  }
   function rerenderCharts() {
     if (lastLine || lastHeat) refresh();
     if (mapData) paintHour();

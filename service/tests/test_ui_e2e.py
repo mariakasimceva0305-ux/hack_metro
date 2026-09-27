@@ -61,6 +61,9 @@ def _ready(page):
 
 def _page(browser, width, height=900, theme="light"):
     page = browser.new_page(viewport={"width": width, "height": height}, color_scheme=theme)
+    # basemap tiles and web fonts are cosmetic and come from slow external CDNs: block them so the suite is deterministic
+    page.route(lambda u: "basemaps.cartocdn.com" in u or "fonts.g" in u or "tile.openstreetmap" in u, lambda r: r.abort())
+    page.set_default_navigation_timeout(60000)
     errors = []
     page.on("pageerror", lambda e: errors.append(str(e)))
     page.on("console", lambda m: m.type == "error" and "Failed to load resource" not in m.text and errors.append(m.text))
@@ -82,7 +85,7 @@ def test_charts_render_after_hidden_start(browser, base_url, width):
     page, errors = _page(browser, width)
     page.add_init_script("document.addEventListener('DOMContentLoaded', () => "
                          "{ document.querySelector('main').style.display = 'none'; })")
-    page.goto(base_url + "/")
+    page.goto(base_url + "/", wait_until="domcontentloaded")
     _ready(page)
     page.evaluate("document.querySelector('main').style.display = ''")
     page.wait_for_timeout(800)
@@ -96,7 +99,7 @@ def test_charts_render_after_hidden_start(browser, base_url, width):
 @pytest.mark.parametrize("theme", ["light", "dark"])
 def test_every_view(browser, base_url, width, theme):
     page, errors = _page(browser, width, theme=theme)
-    page.goto(base_url + "/#overview")
+    page.goto(base_url + "/#overview", wait_until="domcontentloaded")
     _ready(page)
     for v in VIEWS:
         page.click(f"#tab-{v}")
@@ -107,7 +110,7 @@ def test_every_view(browser, base_url, width, theme):
         charts = page.evaluate(CHART_JS)
         assert all(c["box"] > 0 and abs(c["canvas"] - c["box"]) <= 2 for c in charts), (v, charts)
     # hash routing without reload + back button
-    page.goto(base_url + "/#model")
+    page.goto(base_url + "/#model", wait_until="domcontentloaded")
     page.wait_for_timeout(400)
     assert page.is_visible("#view-model") and not page.is_visible("#view-overview")
     page.go_back()
@@ -118,7 +121,7 @@ def test_every_view(browser, base_url, width, theme):
 
 def test_horizons_routes_no_errors(browser, base_url):
     page, errors = _page(browser, 390, 844)
-    page.goto(base_url + "/#analytics")
+    page.goto(base_url + "/#analytics", wait_until="domcontentloaded")
     _ready(page)
     for route in ("all", "7", "17"):
         _filters(page, lambda: page.select_option("#route", route))
@@ -135,7 +138,7 @@ def test_horizons_routes_no_errors(browser, base_url):
 def test_s1_first_screen(browser, base_url):
     """S1: KPIs + map + risky hours visible without scrolling at 1440×900."""
     page, errors = _page(browser, 1440, 900)
-    page.goto(base_url + "/")
+    page.goto(base_url + "/", wait_until="domcontentloaded")
     _ready(page)
     page.wait_for_function("document.querySelectorAll('#riskList .risk-item').length > 0", timeout=20000)
     for sel in ("#kpis", "#map", "#riskList .risk-item"):
@@ -149,7 +152,7 @@ def test_s1_first_screen(browser, base_url):
 @pytest.mark.parametrize("width", [1440, 390])
 def test_scenario_drawer(browser, base_url, width):
     page, errors = _page(browser, width)
-    page.goto(base_url + "/#overview")
+    page.goto(base_url + "/#overview", wait_until="domcontentloaded")
     _ready(page)
     before = page.inner_text("#kTotal")
     page.click("#scnBtn")
@@ -181,7 +184,7 @@ def test_scenario_drawer(browser, base_url, width):
 @pytest.mark.parametrize("width", [1440, 390])
 def test_assistant_apply_goes_to_overview(browser, base_url, width):
     page, errors = _page(browser, width, 844)
-    page.goto(base_url + "/#model")
+    page.goto(base_url + "/#model", wait_until="domcontentloaded")
     _ready(page)
     page.click("#asstBtn")
     page.fill("#asstQ", "сколько вагонов на 17 маршруте завтра в 8 утра")
@@ -198,7 +201,7 @@ def test_assistant_apply_goes_to_overview(browser, base_url, width):
 def test_assistant_example_chips_keep_height(browser, base_url):
     """Regression (coordinator's fix): after many answers the example chips must not be squeezed to 0 px."""
     page, errors = _page(browser, 1440, 900)
-    page.goto(base_url + "/")
+    page.goto(base_url + "/", wait_until="domcontentloaded")
     _ready(page)
     page.click("#asstBtn")
     for q in ("где завтра переполнение", "сколько вагонов на 17 маршруте в 8 утра", "час пик на 11 маршруте в пятницу",
