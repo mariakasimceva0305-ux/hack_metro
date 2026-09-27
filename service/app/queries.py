@@ -855,3 +855,30 @@ def model_query(st: Store) -> dict:
         width = np.nan_to_num(ml.rel_hi - ml.rel_lo)
         out["interval_avg_width_pct"] = round(float((w * width).sum() / w.sum() * 100), 1) if w.sum() else None
     return out
+
+
+# ---------------- road traffic (ЦОДД) ----------------
+def traffic_query(st: Store, date_from, date_to, adj: Adj = NO_ADJ) -> dict:
+    if st.traffic_score is None:
+        raise ApiError(404, "traffic_not_found", "Данные ЦОДД о загруженности дорог не загружены")
+    lo, hi = st.coverage["combined"]
+    a = parse_date(date_from, "date_from") or st.coverage["forecast"][0]
+    b = parse_date(date_to, "date_to") or (a if date_from else hi)
+    if b < a or a < lo or b > hi:
+        raise ApiError(400, "out_of_range", f"Данные о пробках доступны с {lo} по {hi}")
+    scn = dict(adj.traffic)
+    days = []
+    for i in range(st.day_index(a), st.day_index(b) + 1):
+        d = st.day_at(i)
+        sc, nm = float(st.traffic_score[i]), float(st.traffic_norm[i])
+        s2 = scn.get(d)
+        fc = d >= st.coverage["forecast"][0]
+        mult = (1 + adj.w_traffic * (s2 - nm)) if (s2 is not None and fc) else 1.0
+        days.append({"date": str(d), "score": sc, "reported": str(d) in st.traffic_url or sc != 4.0, "norm": round(nm, 2),
+                     "source_url": st.traffic_url.get(str(d)), "scenario_score": s2, "mult": round(mult, 4)})
+    return {"source": "ЦОДД, посты «Дептранс. Оперативно» (t.me/DtOperativno): балл загруженности дорог 0–10",
+            "effect_per_point": adj.w_traffic,
+            "formula": "множитель = 1 + эффект × (балл − норма 3 недель); норма — среднее 21 предыдущего дня, "
+                       "день без поста = 4 балла; v08 предполагает обычный день (балл = норма)",
+            "confirmed": "+2,0 % пассажиров трамвая в дни с баллом ≥ 7 (p = 0,039); +0,7 %/балл к норме 3 недель (p = 0,025)",
+            "days": days}

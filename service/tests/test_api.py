@@ -193,3 +193,9 @@ def test_export_with_corrections_and_scenario(c):
     assert "с коррекцией" in head and "Прогноз модели" in head
     s = c.get("/api/v1/export", params={"format": "csv", "source": "scenario", "route": "7"})
     assert s.status_code == 200 and "Сценарный прогноз" in s.content.decode("utf-8-sig")
+
+
+def test_index_versioned_assets(c):
+    r = c.get("/")
+    assert r.status_code == 200 and "/static/app.js?v=" in r.text and "/static/style.css?v=" in r.text
+    assert r.headers["cache-control"] == "no-cache"

@@ -39,6 +39,9 @@ class Store:
     weather_ref_pr: float = 0.0                   # reference precipitation (Oct 18-31 mean), as in src/adjust.py
     fleet: dict = field(default_factory=dict)
     launch: dict = field(default_factory=dict)    # route -> first forecast date with passengers (new routes)
+    traffic_score: np.ndarray | None = None       # ЦОДД daily road-load score 0–10 (no post = 4) by day index
+    traffic_norm: np.ndarray | None = None        # 3-week norm (mean of the 21 preceding days)
+    traffic_url: dict = field(default_factory=dict)  # date -> permalink of the ЦОДД post
     ml: object = None                             # app.ml.MLData: intervals, anomalies, hybrid, report (optional)
 
     # ---------- helpers ----------
@@ -110,6 +113,7 @@ def load() -> Store:
                forecast_path=str(config.FORECAST_PATH), history_routes=hist_routes, launch=launch)
     _load_explain(st)
     _load_weather(st)
+    _load_traffic(st)
     fleet_p = config.DATA_DIR / "fleet.json"
     if fleet_p.is_file():
         st.fleet = json.loads(fleet_p.read_text(encoding="utf-8"))
@@ -133,6 +137,25 @@ def _load_weather(st: Store) -> None:
     st.weather_pr, st.weather_t = pr, t
     a, b = st.day_index(date(2025, 10, 18)), st.day_index(date(2025, 10, 31))
     st.weather_ref_pr = float(np.nanmean(pr[a:b + 1])) if b >= 0 else 0.0
+
+
+def _load_traffic(st: Store) -> None:
+    p = config.DATA_DIR / "traffic_daily.csv"
+    if not p.is_file():
+        return
+    try:
+        t = pd.read_csv(p, sep=";")
+        sc = np.full(st.n_days, 4.0)
+        nm = np.full(st.n_days, 4.0)
+        for rec in t.itertuples():
+            i = st.day_index(date.fromisoformat(rec.date))
+            if 0 <= i < st.n_days:
+                sc[i], nm[i] = rec.score, rec.norm
+                if isinstance(rec.source_url, str) and rec.source_url:
+                    st.traffic_url[rec.date] = rec.source_url
+        st.traffic_score, st.traffic_norm = sc, nm
+    except Exception:  # optional
+        st.traffic_score = st.traffic_norm = None
 
 
 def _load_explain(st: Store) -> None:

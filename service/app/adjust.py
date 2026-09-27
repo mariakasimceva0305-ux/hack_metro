@@ -30,6 +30,7 @@ import numpy as np
 from .errors import ApiError
 
 DEF_PRECIP, DEF_COLD, DEF_FLOOR, W_CAP = -0.011, -0.034, 0.9, 1.05
+DEF_TRAFFIC = 0.007  # +0.7 % boardings per ЦОДД point above the 3-week norm (research/traffic_source.md, spec C, p=0.025)
 
 
 @dataclass(frozen=True)
@@ -42,6 +43,8 @@ class Adj:
     w_scn: tuple = ()          # ((date, add_mm, temp | None), ...)
     events: tuple = ()         # ((route | "*", d0, d1, k, h0, h1), ...)
     model: str = "v08"         # forecast source: "v08" (structural) or "hybrid" (structural × LightGBM ratio)
+    traffic: tuple = ()        # ((date, score 0–10), ...) ЦОДД road-load scenario
+    w_traffic: float = DEF_TRAFFIC
 
     @property
     def weather_changed(self) -> bool:
@@ -49,7 +52,7 @@ class Adj:
 
     @property
     def active(self) -> bool:
-        return bool(self.level) or self.special != 1.0 or self.weather_changed or bool(self.events)
+        return bool(self.level) or self.special != 1.0 or self.weather_changed or bool(self.events) or bool(self.traffic)
 
     @property
     def base(self) -> "Adj":
@@ -67,6 +70,9 @@ class Adj:
             out.append(f"Погода: осадки {pct(self.w_precip)} %/мм, мороз {pct(self.w_cold)} %, нижняя граница {self.w_floor:g}")
         for d, add, t in self.w_scn:
             out.append(f"Сценарий погоды {d:%d.%m}: {add:+g} мм" + (f", {t:g} °C" if t is not None else ""))
+        if self.traffic:
+            sc = ", ".join(f"{d:%d.%m} — {s:g}" for d, s in self.traffic[:5]) + (" …" if len(self.traffic) > 5 else "")
+            out.append(f"Пробки ЦОДД (баллы): {sc}; эффект {self.w_traffic * 100:+.1f} %/балл к норме 3 недель".replace(".", ","))
         for r, d0, d1, k, h0, h1 in self.events:
             hrs = "" if (h0, h1) == (0, 23) else f", {h0:02d}:00–{h1:02d}:59"
             out.append(f"Событие {'все маршруты' if r == '*' else 'маршрут ' + r}, {d0:%d.%m}–{d1:%d.%m}{hrs}: ×{k:g}")
@@ -91,7 +97,8 @@ def _d(x: str, what: str) -> date:
 
 
 def parse(st, k_level: str | None, k_special: float, w_precip: float, w_cold: float, w_floor: float,
-          w_scenario: str | None, k_event: str | None, model: str = "v08") -> Adj:
+          w_scenario: str | None, k_event: str | None, model: str = "v08", k_traffic: str | None = None,
+          w_traffic: float = DEF_TRAFFIC) -> Adj:
     if model == "hybrid" and "forecast_hybrid" not in st.cubes:
         raise ApiError(400, "model_unavailable",
                        "Гибридная модель ML не загружена (нет файла hybrid_nov_dec.csv): используйте model=v08")
@@ -145,8 +152,25 @@ def parse(st, k_level: str | None, k_special: float, w_precip: float, w_cold: fl
             if not (0 <= h0 <= h1 <= 23):
                 raise ApiError(400, "invalid_adjustment", "k_event: часы от 0 до 23, начало не позже конца")
         events.append((r, d0, d1, k, h0, h1))
+    traffic = []
+    for item in filter(None, (x.strip() for x in (k_traffic or "").split(";"))):
+        if item.lower() in ("actual", "факт", "цодд"):
+            if st.traffic_score is None:
+                raise ApiError(400, "invalid_adjustment", "k_traffic: данные ЦОДД о пробках не загружены")
+            a, b = st.coverage["forecast"]
+            traffic += [(st.day_at(i), float(st.traffic_score[i])) for i in range(st.day_index(a), st.day_index(b) + 1)
+                        if st.traffic_score[i] != st.traffic_norm[i]]
+            continue
+        parts = item.split(":")
+        if len(parts) != 2:
+            raise ApiError(400, "invalid_adjustment", "k_traffic: формат «ГГГГ-ММ-ДД:балл» (0–10), несколько через «;», или actual")
+        d, sc = _d(parts[0], "k_traffic"), _f(parts[1], "k_traffic")
+        if not 0 <= sc <= 10:
+            raise ApiError(400, "invalid_adjustment", "k_traffic: балл пробок от 0 до 10")
+        traffic.append((d, sc))
+    traffic = sorted(dict(traffic).items())
     return Adj(tuple(level), round(k_special, 4), round(w_precip, 5), round(w_cold, 5), round(w_floor, 4),
-               tuple(scn), tuple(events), model)
+               tuple(scn), tuple(events), model, tuple(traffic), round(w_traffic, 5) if traffic else DEF_TRAFFIC)
 
 
 def weather_mult(st, adj: Adj, di: np.ndarray) -> np.ndarray | None:
@@ -194,6 +218,11 @@ def factor(st, adj: Adj, routes: list[str], i0: int, i1: int, h0: int, h1: int) 
             w_old = np.where(np.isnan(w_old) | (w_old <= 0), 1.0, w_old)
             ratio = w_new[None, :, None] / w_old
             f *= np.where(fcm, ratio, 1.0).astype(np.float32)
+    if adj.traffic and st.traffic_norm is not None:
+        for d, sc in adj.traffic:
+            i = st.day_index(d)
+            if i0 <= i <= i1 and i >= fc_from:
+                f[:, i - i0, :] *= max(0.5, 1 + adj.w_traffic * (sc - float(st.traffic_norm[i])))
     for r, d0, d1, k, eh0, eh1 in adj.events:
         a, b = max(st.day_index(d0), i0, fc_from), min(st.day_index(d1), i1)
         c0, c1 = max(eh0, h0), min(eh1, h1)

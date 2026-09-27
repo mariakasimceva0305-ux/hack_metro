@@ -26,6 +26,7 @@
     <a href="#anomCard">ИИ-аномалии</a>
     <a href="/docs" target="_blank" rel="noopener">API · Swagger</a>
     <button id="themeBtn" class="ghost" title="Переключить тему">◐</button>
+    <button class="cat-head" id="catHead" title="Помощник диспетчера" aria-label="Открыть помощника диспетчера"><img src="/static/img/cat_sitting.png" alt="" width="28" height="31"></button>
   </nav>
 </header>
 
@@ -82,10 +83,10 @@
 
 <div id="toast" class="toast hidden" role="alert"></div>
 
-<button id="asstBtn" class="asst-btn" aria-expanded="false" aria-controls="asst">Помощник диспетчера</button>
+<button id="asstBtn" class="asst-btn" aria-expanded="false" aria-controls="asst"><img src="/static/img/cat_sitting.png" alt="" width="26" height="29" class="cat-avatar">Помощник диспетчера</button>
 <section id="asst" class="asst hidden" aria-label="Помощник диспетчера">
   <div class="asst-h">
-    <div><b>Помощник диспетчера</b><div class="muted" id="asstRef"></div></div>
+    <div class="asst-title"><img src="/static/img/cat_sitting.png" alt="Кот-диспетчер" width="34" height="38" class="cat-avatar"><div><b>Помощник диспетчера</b><div class="muted" id="asstRef"></div></div></div>
     <button class="ghost" id="asstClose" aria-label="Закрыть">✕</button>
   </div>
   <div class="asst-log" id="asstLog" aria-live="polite"></div>
@@ -108,26 +109,29 @@
   <div class="card-h adj-h">
     <button class="adj-toggle" id="adjToggle" aria-expanded="true"><span class="chev">▾</span><h2>Корректирующие коэффициенты</h2></button>
     <div class="adj-delta" id="adjDelta"><span class="muted">прогноз модели без коррекции</span></div>
-    <button class="btn small" id="adjReset">Сбросить</button>
+    <span class="badge" id="adjCount" title="Сколько корректировок сейчас применено">не заданы</span>
+    <button class="btn small" id="adjReset" title="Вернуть прогноз модели: сбросить все коэффициенты">Сбросить всё</button>
   </div>
   <div class="adj-body" id="adjBody">
     <div class="adj-grid">
       <fieldset class="adj-col">
-        <legend>Уровень / сезон</legend>
-        <label class="row"><span>Множитель</span><output id="oLevel">×1,00</output></label>
+        <legend>Уровень / сезон<button type="button" class="grp-reset" data-grp="level" title="Сбросить группу «Уровень / сезон»">сброс</button></legend>
+        <p class="grp-desc">Сдвигает весь прогноз: ×1,05 = на 5 % больше пассажиров во все часы выбранных дней прогноза.</p>
+        <label class="row" title="Умножает прогноз на выбранный коэффициент. Пример: ×1,05 — ожидаем на 5 % больше пассажиров (рост спроса, сезон)."><span>Множитель</span><output id="oLevel">×1,00</output></label>
         <input type="range" id="kLevel" min="0.7" max="1.3" step="0.01" value="1">
         <label class="row"><span>Применить к</span>
           <select id="kLevelScope"><option value="all">всем маршрутам</option><option value="route">выбранному маршруту</option></select></label>
-        <legend class="sub">Особые дни</legend>
-        <label class="row"><span>Сила эффекта праздников и переносов</span><output id="oSpecial">×1,00</output></label>
+        <legend class="sub">Особые дни<button type="button" class="grp-reset" data-grp="special" title="Сбросить «Особые дни»">сброс</button></legend>
+        <label class="row" title="1 — праздники и переносы влияют как в модели; 0 — считать такие дни обычными; 1,5 — эффект на 50 % сильнее."><span>Сила эффекта праздников и переносов</span><output id="oSpecial">×1,00</output></label>
         <input type="range" id="kSpecial" min="0" max="2" step="0.05" value="1">
         <p class="hint">1 — как в модели, 0 — считать особые дни обычными.</p>
       </fieldset>
       <fieldset class="adj-col">
-        <legend>Погода</legend>
-        <label class="row"><span>Осадки, % на 1 мм</span><input type="number" id="wPrecip" value="-1.1" step="0.1" min="-20" max="20"></label>
-        <label class="row"><span>Мороз ниже −10 °C, %</span><input type="number" id="wCold" value="-3.4" step="0.1" min="-50" max="50"></label>
-        <label class="row"><span>Нижняя граница множителя</span><input type="number" id="wFloor" value="0.9" step="0.01" min="0.3" max="1"></label>
+        <legend>Погода<button type="button" class="grp-reset" data-grp="weather" title="Сбросить группу «Погода»">сброс</button></legend>
+        <p class="grp-desc">Дождь и снег снижают поездки: −1,1 % на каждый мм осадков сверх нормы, −3,4 % в мороз ниже −10 °C.</p>
+        <label class="row" title="Эффект каждого миллиметра осадков за 06–21 ч относительно нормы конца октября. Модель: −1,1 %/мм."><span>Осадки, % на 1 мм</span><input type="number" id="wPrecip" value="-1.1" step="0.1" min="-20" max="20"></label>
+        <label class="row" title="Снижение пассажиропотока в день со средней температурой ниже −10 °C. Модель: −3,4 %."><span>Мороз ниже −10 °C, %</span><input type="number" id="wCold" value="-3.4" step="0.1" min="-50" max="50"></label>
+        <label class="row" title="Погода не может снизить прогноз сильнее этого множителя (0,9 = не более −10 %)."><span>Нижняя граница множителя</span><input type="number" id="wFloor" value="0.9" step="0.01" min="0.3" max="1"></label>
         <div class="whatif">
           <div class="row"><span>Что если: на дату</span><input type="date" id="wDate" min="2025-11-01" max="2025-12-31"></div>
           <div class="row"><span>осадки +мм / t, °C</span><span class="pair"><input type="number" id="wMm" value="10" step="1" min="-50" max="100"><input type="number" id="wT" placeholder="t" step="1" min="-50" max="45"></span></div>
@@ -137,7 +141,8 @@
         <p class="hint" id="wInfo"></p>
       </fieldset>
       <fieldset class="adj-col">
-        <legend>События</legend>
+        <legend>События<button type="button" class="grp-reset" data-grp="events" title="Сбросить группу «События»">сброс</button></legend>
+        <p class="grp-desc">Перекрытия, ремонты, фестивали: множитель на маршрут (или все) на даты и часы. ×0 — движения нет, ×1,2 — на 20 % больше.</p>
         <div class="row"><span>Маршрут</span><select id="eRoute"></select></div>
         <div class="row"><span>С / по</span><span class="pair"><input type="date" id="eFrom" min="2025-11-01" max="2025-12-31"><input type="date" id="eTo" min="2025-11-01" max="2025-12-31"></span></div>
         <div class="row"><span>Часы</span><span class="pair"><select id="eH0"></select><select id="eH1"></select></span></div>
@@ -149,6 +154,21 @@
           <button class="btn small" id="eAdd">Добавить событие</button>
         </div>
         <div class="chips" id="eChips"></div>
+      </fieldset>
+      <fieldset class="adj-col" id="trafficCol">
+        <legend>Пробки (ЦОДД, баллы 0–10)<button type="button" class="grp-reset" data-grp="traffic" title="Сбросить группу «Пробки (ЦОДД, баллы 0–10)»">сброс</button></legend>
+        <p class="grp-desc">Пробки выше нормы переводят часть поездок на трамвай: +0,7 % на балл выше нормы 3 недель.</p>
+        <p class="hint tight" id="tInfo">—</p>
+        <label class="row"><span>Сценарий на дату</span><input type="date" id="tDate" min="2025-11-01" max="2025-12-31"></label>
+        <label class="row"><span>Балл пробок</span><output id="oTraffic">7</output></label>
+        <input type="range" id="tScore" min="0" max="10" step="1" value="7" aria-label="Балл пробок ЦОДД">
+        <label class="row" title="Подтверждено: +0,7 % пассажиров трамвая на каждый балл выше нормы 3 недель (p = 0,025)"><span>Эффект, % на балл выше нормы</span><input type="number" id="tEffect" value="0.7" step="0.1" min="0" max="5"></label>
+        <div class="btns wrap">
+          <button class="btn small" id="tAdd">Применить балл</button>
+          <button class="btn small ghost-btn" id="tActual" title="Взять фактические посты ЦОДД за ноябрь–декабрь 2025">Фактические посты ЦОДД</button>
+        </div>
+        <div class="chips" id="tChips"></div>
+        <p class="hint">Модель v08 считает день обычным (балл = норма). Пробки выше нормы переводят часть поездок с автомобиля на трамвай: +0,7 %/балл; в дни с баллом ≥ 7 — в среднем +2 %.</p>
       </fieldset>
     </div>
     <p class="hint">Коэффициенты пересчитывают прогноз на всех графиках, карте, KPI, в выпуске подвижного состава и в экспорте. Факт (январь–октябрь) не меняется.
@@ -283,6 +303,7 @@
 </main>
 
 <footer class="foot">
+  <img src="/static/img/cat_sitting.png" alt="" width="40" height="44" class="foot-cat" loading="lazy">
   Данные: валидации трамвайных маршрутов 1, 7, 11, 12, 17, 25, 26, 28, 50 (январь–октябрь 2025). Маршрут 5 — новый (запуск 16.12.2025): только прогноз.
   Геопривязка остановок доступна для маршрутов 1, 5, 7, 11, 12. <span id="footInfo"></span>
 </footer>

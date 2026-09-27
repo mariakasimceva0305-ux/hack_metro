@@ -95,6 +95,7 @@ def main() -> None:
     ml_files = copy_ml(Path(args.ml_dir))
     build_pipeline_report()
     build_weather()
+    build_traffic()
     build_fleet(sheets, stops)
     from datetime import datetime
     meta = {"forecast_source": Path(args.forecast).name,
@@ -141,6 +142,27 @@ def build_weather() -> None:
     d.index.name = "date"
     d.to_csv(OUT / "weather_daily.csv", sep=";")
     print("weather days:", len(d))
+
+
+def build_traffic() -> None:
+    """Daily ЦОДД road-load score (0–10, «Дептранс. Оперативно»), its 3-week norm and a permalink as evidence.
+    Days without a post are «normal» (score 4, see research/traffic_source.md); norm = mean of the 21 preceding days."""
+    src = ROOT / "research" / "traffic_moscow_2025_daily.csv"
+    if not src.exists():
+        print("traffic: none")
+        return
+    d = pd.read_csv(src)
+    d["score"] = d.max_score.fillna(4.0)
+    d["norm"] = d.score.shift(1).rolling(21, min_periods=7).mean().fillna(4.0).round(3)
+    posts = ROOT / "research" / "traffic_moscow_2025.csv"
+    if posts.exists():
+        p = pd.read_csv(posts).sort_values(["date", "score"], ascending=[True, False]).drop_duplicates("date")
+        d = d.merge(p[["date", "source_url"]], on="date", how="left")
+    else:
+        d["source_url"] = None
+    out = d[["date", "score", "norm", "reported", "n_posts", "source_url"]]
+    out.to_csv(OUT / "traffic_daily.csv", sep=";", index=False)
+    print("traffic days:", len(out), "reported:", int(out.reported.sum()))
 
 
 def build_fleet(sheets: dict, stops: list[dict]) -> None:

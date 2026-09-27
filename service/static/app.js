@@ -19,11 +19,11 @@
     route: "all", horizon: "day", date: "2025-11-11", month: "2025-11", growth: 0,
     hourFrom: 0, hourTo: 23, hour: 8, stop: null, stopName: "",
     routes: [], coverage: null, explainAvailable: false, map: null, playing: null, band: 10,
-    adj: { level: 1, scope: "all", special: 1, precip: -1.1, cold: -3.4, floor: 0.9, scn: [], events: [] },
+    adj: { level: 1, scope: "all", special: 1, precip: -1.1, cold: -3.4, floor: 0.9, scn: [], events: [], traffic: [], tActual: false, wTraffic: 0.7 },
     lastFit: null,
     model: "v08", planP90: false, ml: {}, anomKind: "",
   };
-  const ADJ_DEFAULT = JSON.stringify({ level: 1, scope: "all", special: 1, precip: -1.1, cold: -3.4, floor: 0.9, scn: [], events: [] });
+  const ADJ_DEFAULT = JSON.stringify({ level: 1, scope: "all", special: 1, precip: -1.1, cold: -3.4, floor: 0.9, scn: [], events: [], traffic: [], tActual: false, wTraffic: 0.7 });
   const num = (v) => Math.round(v * 10000) / 10000;
   function adjParams() {
     const a = S.adj, out = {};
@@ -33,11 +33,13 @@
     if (a.cold !== -3.4) out.w_cold = num(a.cold / 100);
     if (a.floor !== 0.9) out.w_floor = a.floor;
     if (a.scn.length) out.w_scenario = a.scn.map((x) => `${x.date}:${x.mm}${x.t !== null && x.t !== "" ? ":" + x.t : ""}`).join(";");
+    if (a.tActual || a.traffic.length) out.k_traffic = [...(a.tActual ? ["actual"] : []), ...a.traffic.map((x) => `${x.date}:${x.score}`)].join(";");
+    if (out.k_traffic && a.wTraffic !== 0.7) out.w_traffic = num(a.wTraffic / 100);
     if (a.events.length) out.k_event = a.events.map((e) => `${e.route}:${e.from}:${e.to}:${e.k}${e.h0 !== 0 || e.h1 !== 23 ? `:${e.h0}-${e.h1}` : ""}`).join(";");
     return out;
   }
   const adjActive = () => Object.keys(adjParams()).length > 0;
-  const ADJ_PATHS = new Set(["/series", "/forecast", "/forecast/stop", "/kpi", "/map", "/fleet", "/scenario/year", "/weather", "/assistant"]);
+  const ADJ_PATHS = new Set(["/series", "/forecast", "/forecast/stop", "/kpi", "/map", "/fleet", "/scenario/year", "/weather", "/assistant", "/assistant/query", "/traffic"]);
   const modelParams = () => (S.model === "hybrid" ? { model: "hybrid" } : {});
 
   // ---------------- API ----------------
@@ -116,6 +118,7 @@
       S.horizon = b.dataset.h;
       [...$("horizon").children].forEach((x) => x.classList.toggle("on", x === b));
       if (S.horizon === "month") S.month = S.date.slice(0, 7), $("month").value = S.month;
+      $("lineChart").classList.add("fade");  // smooth day ↔ month ↔ year switch (cleared when the new chart is drawn)
       refresh();
     };
     $("date").onchange = (e) => {
@@ -171,11 +174,50 @@
     renderAdjInfo();
     $("stopChip").classList.toggle("hidden", !S.stop);
     if (S.stop) $("stopChip").textContent = `Остановка: ${S.stopName} ✕`;
-    const jobs = [loadMap(), loadKpis(), loadLine(), loadHeat(), loadTable(), loadExplain(), loadFleet(), loadWeatherInfo(), loadAnomalies()];
+    const jobs = [track("map", loadMap()), loadKpis(), track("lineChart", loadLine()), track("heatChart", loadHeat()), loadTable(), loadExplain(),
+      track("fleetChart", loadFleet()), loadWeatherInfo(), loadAnomalies(), loadTrafficInfo()];
     const res = await Promise.allSettled(jobs);
     if (my !== seq) return;
     const err = res.find((r) => r.status === "rejected");
     if (err) toast(err.reason.message);
+  }
+
+  // ---------------- loading / empty states (cat mascot) ----------------
+  const CAT_LYING = "/static/img/cat_lying.png";
+  function overlayFor(id) {
+    const el = $(id);
+    let host = el.parentElement;
+    if (id !== "map" && !host.classList.contains("chart-wrap")) {
+      const w = document.createElement("div");
+      w.className = "chart-wrap";
+      el.replaceWith(w); w.appendChild(el); host = w;
+    }
+    let ov = host.querySelector(":scope > .loader");
+    if (!ov) {
+      ov = document.createElement("div");
+      ov.className = "loader hidden";
+      ov.innerHTML = `<div class="skel"></div><div class="loader-cat"><img src="${CAT_LYING}" alt="" width="84" height="94"><span></span></div>`;
+      host.appendChild(ov);
+    }
+    return ov;
+  }
+  /** Skeleton + lying cat «Считаю прогноз…» while a block loads (only if it takes > 250 ms, so fast answers don't flicker). */
+  function track(id, promise) {
+    const ov = overlayFor(id);
+    const t = setTimeout(() => {
+      ov.querySelector("span").textContent = "Считаю прогноз…";
+      ov.classList.remove("hidden", "empty"); ov.classList.add("busy");
+    }, 250);
+    const done = () => { clearTimeout(t); ov.classList.remove("busy"); $(id).classList.remove("fade"); if (!ov.classList.contains("empty")) ov.classList.add("hidden"); };
+    promise.then(done, done);
+    return promise;
+  }
+  /** Empty state: the same cat with a message instead of a blank chart. */
+  function setEmpty(id, text) {
+    const ov = overlayFor(id);
+    if (!text) { ov.classList.remove("empty"); ov.classList.add("hidden"); return; }
+    ov.querySelector("span").textContent = text;
+    ov.classList.remove("hidden", "busy"); ov.classList.add("empty");
   }
 
   // ---------------- KPIs ----------------
@@ -257,12 +299,37 @@
       a.events.push({ route: $("eRoute").value, from, to, k, h0, h1 });
       adjChanged(true);
     };
+    $("tDate").min = fc0; $("tDate").max = fc1; $("tDate").value = $("wDate").value;
+    $("tScore").oninput = (e) => { $("oTraffic").textContent = e.target.value; };
+    $("tDate").onchange = () => { $("tDate").dataset.user = "1"; loadTrafficInfo(); };
+    $("tAdd").onclick = () => {
+      const d = $("tDate").value;
+      if (!d || d < fc0 || d > fc1) { toast(`Сценарий пробок задаётся на даты прогноза: ${fc0} — ${fc1}`); return; }
+      a.traffic = a.traffic.filter((x) => x.date !== d).concat([{ date: d, score: +$("tScore").value }]);
+      adjChanged(true);
+    };
+    $("tActual").onclick = () => { a.tActual = !a.tActual; adjChanged(true); };
+    $("tEffect").onchange = (e) => { a.wTraffic = clampIn(e.target, 0, 5, 0.7); if (a.tActual || a.traffic.length) adjChanged(true); };
     $("adjReset").onclick = () => {
       Object.assign(a, JSON.parse(ADJ_DEFAULT));
+      $("tEffect").value = 0.7;
       $("kLevel").value = 1; $("kSpecial").value = 1; $("wPrecip").value = -1.1; $("wCold").value = -3.4; $("wFloor").value = 0.9; $("kLevelScope").value = "all";
       $("oLevel").textContent = "×1,00"; $("oSpecial").textContent = "×1,00";
       adjChanged(true);
     };
+    const syncInputs = () => {
+      $("kLevel").value = a.level; $("kSpecial").value = a.special; $("wPrecip").value = a.precip; $("wCold").value = a.cold;
+      $("wFloor").value = a.floor; $("kLevelScope").value = a.scope; $("tEffect").value = a.wTraffic;
+      $("oLevel").textContent = `×${a.level.toFixed(2).replace(".", ",")}`; $("oSpecial").textContent = `×${a.special.toFixed(2).replace(".", ",")}`;
+    };
+    document.querySelectorAll(".grp-reset").forEach((b) => (b.onclick = (e) => {
+      e.preventDefault(); e.stopPropagation();
+      const d = JSON.parse(ADJ_DEFAULT);
+      ({ level: () => { a.level = d.level; a.scope = d.scope; }, special: () => { a.special = d.special; },
+         weather: () => { a.precip = d.precip; a.cold = d.cold; a.floor = d.floor; a.scn = []; },
+         events: () => { a.events = []; }, traffic: () => { a.traffic = []; a.tActual = false; a.wTraffic = d.wTraffic; } })[b.dataset.grp]();
+      syncInputs(); adjChanged(true);
+    }));
     $("adjToggle").onclick = () => {
       const c = $("adjCard").classList.toggle("collapsed");
       $("adjToggle").setAttribute("aria-expanded", String(!c));
@@ -282,6 +349,14 @@
     $("eChips").innerHTML = a.events.map((e, i) => `<span class="chip" data-i="${i}" title="Убрать">${e.route === "all" ? "все" : "№ " + e.route}, ${short(e.from)}–${short(e.to)}${e.h0 !== 0 || e.h1 !== 23 ? `, ${pad(e.h0)}–${pad(e.h1 + 1)} ч` : ""}: ×${String(e.k).replace(".", ",")} ✕</span>`).join("");
     [...$("wChips").children].forEach((c) => (c.onclick = () => { a.scn.splice(+c.dataset.i, 1); adjChanged(true); }));
     [...$("eChips").children].forEach((c) => (c.onclick = () => { a.events.splice(+c.dataset.i, 1); adjChanged(true); }));
+    $("tChips").innerHTML = (a.tActual ? `<span class="chip" data-a="1" title="Убрать">факт ЦОДД ноя–дек ✕</span>` : "")
+      + a.traffic.map((x, i) => `<span class="chip" data-i="${i}" title="Убрать">${short(x.date)}: ${x.score} балл. ✕</span>`).join("");
+    [...$("tChips").children].forEach((c) => (c.onclick = () => { if (c.dataset.a) a.tActual = false; else a.traffic.splice(+c.dataset.i, 1); adjChanged(true); }));
+    $("tActual").classList.toggle("on", a.tActual);
+    const n = (a.level !== 1) + (a.special !== 1) + (a.precip !== -1.1 || a.cold !== -3.4 || a.floor !== 0.9) + a.scn.length
+      + a.events.length + a.traffic.length + (a.tActual ? 1 : 0);
+    $("adjCount").textContent = n ? `активно: ${n}` : "не заданы";
+    $("adjCount").classList.toggle("on", n > 0);
     const q = new URLSearchParams(adjParams()).toString();
     $("adjApi").textContent = q ? `/api/v1/forecast?route=${S.route}&…&${decodeURIComponent(q)}` : "параметры не заданы (прогноз модели)";
     if (!adjActive()) $("adjDelta").innerHTML = `<span class="muted">прогноз модели без коррекции</span>`;
@@ -295,6 +370,18 @@
     }
     const d = k.delta, cls = d.pct > 0 ? "pos" : d.pct < 0 ? "neg" : "";
     $("adjDelta").innerHTML = `было <b>${fmt(d.total_before)}</b> → стало <b>${fmt(d.total_after)}</b> <b class="${cls}">(${sign(d.pct)} %)</b> <span class="muted">пасс. за выбранный период</span>`;
+  }
+  async function loadTrafficInfo() {
+    // follows the dashboard date (forecast days) until the dispatcher picks another date in the traffic group
+    if (!$("tDate").dataset.user && S.date >= S.coverage.forecast.from) $("tDate").value = S.date;
+    const d = $("tDate").value || S.coverage.forecast.from;
+    try {
+      const t = await api("/traffic", { date_from: d, date_to: d });
+      const x = t.days[0];
+      const link = x.source_url ? ` <a href="${esc(x.source_url)}" target="_blank" rel="noopener">пост ЦОДД</a>` : "";
+      $("tInfo").innerHTML = `${human(d)}: по ЦОДД ${x.reported ? `<b>${String(x.score).replace(".", ",")} балл.</b>${link}` : "поста нет (обычный день ≈ 4)"}, `
+        + `норма 3 недель ${String(x.norm).replace(".", ",")}.` + (x.mult !== 1 ? ` Сценарий: ×${x.mult.toFixed(3).replace(".", ",")}.` : "");
+    } catch { $("tInfo").textContent = "Данные ЦОДД о пробках не загружены."; }
   }
   async function loadWeatherInfo() {
     const d = S.date >= S.coverage.forecast.from ? S.date : S.coverage.forecast.from;
@@ -321,6 +408,22 @@
     S.map.on("mouseout", () => S.map.scrollWheelZoom.disable());
     if (window.ResizeObserver) new ResizeObserver(() => S.map.invalidateSize()).observe($("map"));
     applyTheme(localStorageGet("theme"));
+    loadLiveTraffic();
+  }
+  /** Optional live layer (TomTom Flow Segment Data near stops): only when scripts/fetch_traffic.py ran with a working key. */
+  async function loadLiveTraffic() {
+    let live;
+    try { live = await api("/traffic/live"); } catch { return; }
+    if (!live.available || !live.points?.length) return;
+    const layer = L.layerGroup();
+    const col = (r) => (r === null ? css("--text-muted") : r < 0.5 ? css("--bad") : r < 0.75 ? css("--warn") : css("--good"));
+    for (const p of live.points) {
+      L.circleMarker([p.lat, p.lon], { radius: 6, weight: 0, fillOpacity: 0.45, fillColor: col(p.ratio), interactive: true })
+        .bindTooltip(`Пробки TomTom у «${esc(p.name)}»: ${p.current_speed ?? "—"} км/ч при свободной ${p.free_flow_speed ?? "—"} км/ч`
+          + (p.road_closure ? " · перекрытие" : ""), { direction: "top" }).addTo(layer);
+    }
+    L.control.layers(null, { [`Пробки TomTom (сейчас, ${new Date(live.fetched_at).toLocaleString("ru-RU", { dateStyle: "short", timeStyle: "short" })})`]: layer },
+      { collapsed: false, position: "topright" }).addTo(S.map);
   }
   const seqColors = () => [0, 1, 2, 3, 4, 5, 6].map((i) => css(`--seq-${i}`));
   function colorFor(v, max) {
@@ -439,14 +542,29 @@
   // ---------------- Charts ----------------
   const charts = { line: null, heat: null, fleet: null };
   let lastLine = null, lastHeat = null;
+  // Charts must follow their container, not only the window: if a chart is first drawn while the page or card is
+  // hidden or still being laid out (background tab, collapsed preview pane, mobile reflow), ECharts falls back to a
+  // 100 px canvas and stays blank-looking until the next window resize. The map already recovers via its own observer.
+  const chartObserver = window.ResizeObserver ? new ResizeObserver((entries) => {
+    for (const e of entries) {
+      const c = echarts.getInstanceByDom(e.target);
+      if (c && e.contentRect.width > 0 && e.contentRect.height > 0
+          && (c.getWidth() !== Math.round(e.contentRect.width) || c.getHeight() !== Math.round(e.contentRect.height))) c.resize();
+    }
+  }) : null;
   function chart(id, key) {
-    if (!charts[key]) charts[key] = echarts.init($(id), null, { renderer: "canvas" });
+    if (!charts[key] || charts[key].isDisposed()) {
+      charts[key] = echarts.init($(id), null, { renderer: "canvas" });
+      chartObserver?.observe($(id));
+    }
     return charts[key];
   }
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) Object.values(charts).forEach((c) => c && !c.isDisposed() && c.resize()); });
   function baseOpt() {
     const t2 = css("--text-secondary"), grid = css("--grid");
     return {
       textStyle: { fontFamily: "Inter, system-ui, sans-serif", color: t2 },
+      animationDuration: 450, animationDurationUpdate: 350, animationEasing: "cubicOut", animationEasingUpdate: "cubicOut",
       grid: { left: 56, right: 18, top: 36, bottom: 44 },
       tooltip: { trigger: "axis", backgroundColor: css("--surface-1"), borderColor: css("--border"), textStyle: { color: css("--text-primary") },
         valueFormatter: (v) => (v === null || v === undefined ? "—" : fmt(v)) },
@@ -465,7 +583,8 @@
 
   async function loadLine() {
     const c1 = css("--series-1"), c2 = css("--series-2");
-    if (!routeHasData(S.route)) { chart("lineChart", "line").clear(); $("lineHint").textContent = "Для маршрута нет данных о пассажиропотоке."; return; }
+    setEmpty("lineChart", null);
+    if (!routeHasData(S.route)) { chart("lineChart", "line").clear(); $("lineHint").textContent = "Для маршрута нет данных о пассажиропотоке."; setEmpty("lineChart", "Для маршрута нет данных о пассажиропотоке"); return; }
     const who = S.stop ? `остановка «${S.stopName}» (оценка)` : S.route === "all" ? "все маршруты" : `маршрут № ${S.route}`;
     let opt, lineNote = "";
     if (S.horizon === "day") {
@@ -500,7 +619,8 @@
       const src = srcFor(a);
       if (src === "history" && !routeHasHistory(S.route)) {
         chart("lineChart", "line").clear(); lastLine = null;
-        $("lineTitle").textContent = `Суточные итоги: ${who}`; $("lineHint").textContent = "Факта нет: маршрут новый."; return;
+        $("lineTitle").textContent = `Суточные итоги: ${who}`; $("lineHint").textContent = "Факта нет: маршрут новый.";
+        setEmpty("lineChart", `Факта нет: маршрут № ${S.route} запущен ${human(launchOf(S.route))}`); return;
       }
       const r = await stopOrRoute(src, a, b, "day");
       const days = r.points.map((p) => p.date);
@@ -558,6 +678,7 @@
     }
     lastLine = opt;
     chart("lineChart", "line").setOption(opt, true);
+    requestAnimationFrame(() => $("lineChart").classList.remove("fade"));
   }
 
   async function loadHeat() {
@@ -751,7 +872,7 @@
       }
       if (band && band.lo[i] !== null && band.lo[i] !== undefined) s += `<span style="color:${css("--text-muted")}">${BAND}: ${fmt(band.lo[i])} – ${fmt(band.hi[i])}</span><br>`;
       for (const e of (anByIdx && anByIdx[i]) || []) {
-        s += `<span style="color:${e.kind === "drop" ? css("--bad") : css("--warn")}">● ${esc(e.kind_ru)}${S.route === "all" ? `, маршрут ${e.route}` : ""}: ${esc(e.label)}`
+        s += `<span style="color:${e.kind === "drop" ? css("--bad-text") : css("--warn-text")}">● ${esc(e.kind_ru)}${S.route === "all" ? `, маршрут ${e.route}` : ""}: ${esc(e.label)}`
           + `${e.deviation_pct !== null ? ` (${sign(e.deviation_pct)} % к типичному дню)` : ""}</span><br>`;
       }
       return s;
@@ -889,6 +1010,7 @@
       if (v) { $("asstRef").textContent = `«сегодня» = выбранная дата, ${human(S.date)}`; $("asstQ").focus(); }
     };
     $("asstBtn").onclick = () => open($("asst").classList.contains("hidden"));
+    if ($("catHead")) $("catHead").onclick = () => open(true);
     $("asstClose").onclick = () => open(false);
     const ex = ["Где завтра переполнение?", "Сколько вагонов нужно на 17 маршруте в 8 утра?", "Когда час пик на 11 маршруте в пятницу?", "Какие аномалии были на маршруте 1 в мае?", "Как устроена модель?"];
     $("asstEx").innerHTML = ex.map((q) => `<span class="chip">${esc(q)}</span>`).join("");
@@ -896,33 +1018,99 @@
     $("asstForm").onsubmit = (e) => { e.preventDefault(); const q = $("asstQ").value.trim(); if (q) ask(q); $("asstQ").value = ""; };
     addMsg("a", "Отвечаю по данным сервиса: переполнение, вагоны, пассажиропоток, час пик, аномалии, модель. Укажите маршрут, дату и час.");
   }
-  async function ask(q) {
-    $("asstEx").classList.add("hidden");
-    addMsg("q", esc(q));
-    try {
-      const r = await api("/assistant", { q, ref_date: S.date, plan_by: S.planP90 ? "p90" : null });
-      const d = addMsg("a", esc(r.answer) + (r.items.length ? `<ul>${r.items.map((i) => `<li>${esc(i)}</li>`).join("")}</ul>` : ""));
-      const act = r.action || {};
-      if (act.route || act.date || act.scroll) {
-        const b = document.createElement("button");
-        b.className = "btn small"; b.textContent = "Показать на дашборде";
-        b.onclick = () => applyAction(act);
-        d.appendChild(document.createElement("br")); d.appendChild(b);
-      }
-    } catch (e) { addMsg("a", esc(e.message)); }
+  async function apiPost(path, body) {
+    const q = new URLSearchParams(Object.entries({ ...adjParams(), ...modelParams() }));
+    const r = await fetch(`${API}${path}?${q}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    const b = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(b?.error?.message || `Ошибка ${r.status}`);
+    return b;
   }
-  function applyAction(act) {
-    let changed = false;
-    if (act.route && act.route !== S.route && (act.route === "all" || S.routes.some((x) => x.route === act.route))) {
-      S.route = act.route; $("route").value = act.route; S.stop = null; changed = true;
+  const INTENTS = { load: "пассажиропоток", vehicles: "вагоны", overflow: "переполнение", peak: "час пик", anomalies: "аномалии", model: "модель", help: "справка" };
+  const hrLbl = (a, b) => `${pad(a)}:00–${pad((b + 1) % 24)}:00`;
+  async function ask(text, edited = null) {
+    addMsg("q", esc(text) + (edited ? ` <small>(исправленные параметры)</small>` : ""));
+    const wait = addMsg("a thinking", `<span class="dots">Считаю</span>`);
+    try {
+      const r = await apiPost("/assistant/query", { text, ref_date: S.date, plan_by: S.planP90 ? "p90" : "p50", ...(edited ? { query: edited } : {}) });
+      wait.remove();
+      const d = addMsg("a", esc(r.answer) + (r.items.length ? `<ul>${r.items.map((i) => `<li>${esc(i)}</li>`).join("")}</ul>` : ""));
+      if (r.intent !== "help" && r.intent !== "model") d.appendChild(queryCard(text, r));
+    } catch (e) { wait.remove(); addMsg("a", esc(e.message)); }
+  }
+  /** Recognised parameters as chips + an inline editor: «Применить» (to the dashboard) / «Изменить» (re-ask). */
+  function queryCard(text, r) {
+    const q = r.query, box = document.createElement("div");
+    box.className = "qcard";
+    const chips = [];
+    chips.push(["Что", INTENTS[q.intent] || q.intent]);
+    chips.push(["Маршрут", !q.route || q.route === "all" ? "все" : `№ ${q.route}`]);
+    if (q.date_from) chips.push([q.date_from === q.date_to ? "Дата" : "Период", q.date_from === q.date_to ? human(q.date_from) : `${short(q.date_from)} – ${short(q.date_to)}`]);
+    if (q.hour_ranges && q.hour_ranges.length) chips.push(["Часы", q.hour_ranges.map(([a, b]) => hrLbl(a, b)).join(" и ")]);
+    for (const [k, v] of Object.entries(q.corrections || {})) chips.push([{ k_level: "Уровень", k_event: "Событие", w_scenario: "Погода", k_traffic: "Пробки" }[k] || k, v]);
+    const fixes = r.fixes && r.fixes.length ? `<div class="muted small">Исправлено: ${esc(r.fixes.join(", "))}</div>` : "";
+    box.innerHTML = `<div class="qchips">${chips.map(([k, v]) => `<span class="qchip"><i>${esc(k)}</i>${esc(v)}</span>`).join("")}</div>${fixes}
+      <div class="qbtns"><button class="btn small primary" data-act="apply">Применить</button><button class="btn small" data-act="edit">Изменить</button></div>
+      <form class="qedit hidden">
+        <label>Что<select name="intent">${Object.entries(INTENTS).filter(([k]) => k !== "help").map(([k, v]) => `<option value="${k}" ${k === q.intent ? "selected" : ""}>${v}</option>`).join("")}</select></label>
+        <label>Маршрут<select name="route"><option value="all">все</option>${S.routes.filter((x) => x.has_data).map((x) => `<option value="${x.route}" ${x.route === q.route ? "selected" : ""}>№ ${x.route}</option>`).join("")}</select></label>
+        <label>С<input type="date" name="date_from" value="${q.date_from || S.date}" min="${S.coverage.combined.from}" max="${S.coverage.combined.to}"></label>
+        <label>По<input type="date" name="date_to" value="${q.date_to || q.date_from || S.date}" min="${S.coverage.combined.from}" max="${S.coverage.combined.to}"></label>
+        <label>Часы с<select name="hour_from"><option value="">весь день</option>${[...Array(24).keys()].map((h) => `<option value="${h}" ${h === q.hour_from ? "selected" : ""}>${pad(h)}:00</option>`).join("")}</select></label>
+        <label>до<select name="hour_to">${[...Array(24).keys()].map((h) => `<option value="${h}" ${h === q.hour_to ? "selected" : ""}>${pad((h + 1) % 24)}:00</option>`).join("")}</select></label>
+        <div class="qbtns"><button class="btn small primary" type="submit">Пересчитать</button><button class="btn small" type="button" data-act="cancel">Отмена</button></div>
+      </form>`;
+    const form = box.querySelector("form");
+    box.querySelector("[data-act=edit]").onclick = () => {
+      form.classList.toggle("hidden");
+      if (!form.classList.contains("hidden")) form.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    };
+    box.querySelector("[data-act=cancel]").onclick = () => form.classList.add("hidden");
+    box.querySelector("[data-act=apply]").onclick = () => applyQuery(q, r.action);
+    form.onsubmit = (e) => {
+      e.preventDefault();
+      const f = new FormData(form);
+      const h0 = f.get("hour_from");
+      const edited = { intent: f.get("intent"), route: f.get("route"), date_from: f.get("date_from"), date_to: f.get("date_to"),
+        corrections: q.corrections || {} };
+      if (h0 !== "") { edited.hour_from = +h0; edited.hour_to = Math.max(+h0, +f.get("hour_to")); edited.hour_ranges = [[edited.hour_from, edited.hour_to]]; }
+      else edited.hour_ranges = [];
+      form.classList.add("hidden");
+      ask(text, edited);
+    };
+    return box;
+  }
+  /** Apply a recognised query to the dashboard: route, date/period → horizon, hour filter, corrections. */
+  function applyQuery(q, act) {
+    if (q.route && (q.route === "all" || S.routes.some((x) => x.route === q.route && x.has_data))) { S.route = q.route; $("route").value = q.route; S.stop = null; }
+    if (q.date_from) {
+      const multi = q.date_to && q.date_to !== q.date_from;
+      S.date = q.date_from; $("date").value = q.date_from;
+      S.horizon = multi ? "month" : "day";
+      if (multi) { S.month = q.date_from.slice(0, 7); $("month").value = S.month; }
+      [...$("horizon").children].forEach((x) => x.classList.toggle("on", x.dataset.h === S.horizon));
     }
-    if (act.date && (act.date !== S.date || S.horizon !== "day")) {
-      S.date = act.date; $("date").value = act.date; S.horizon = "day";
-      [...$("horizon").children].forEach((x) => x.classList.toggle("on", x.dataset.h === "day")); changed = true;
+    if (q.hour_ranges && q.hour_ranges.length) { S.hour = q.hour_ranges[0][0]; $("hour").value = S.hour; }
+    const c = q.corrections || {}, a = S.adj;
+    if (c.k_event) for (const it of c.k_event.split(";")) {
+      const [route, from, to, k, hh] = it.split(":"); const [h0, h1] = hh ? hh.split("-").map(Number) : [0, 23];
+      a.events.push({ route, from, to, k: +k, h0, h1 });
     }
-    if (act.hour !== null && act.hour !== undefined) { S.hour = act.hour; $("hour").value = act.hour; paintHour(); }
-    if (changed) refresh();
-    $(act.scroll || "lineChart")?.scrollIntoView({ behavior: "smooth", block: "start" });
+    if (c.w_scenario) for (const it of c.w_scenario.split(";")) {
+      const [date, mm, t] = it.split(":"); a.scn = a.scn.filter((x) => x.date !== date).concat([{ date, mm: +mm, t: t === undefined ? null : +t }]);
+    }
+    if (c.k_traffic) for (const it of c.k_traffic.split(";")) {
+      if (it === "actual") { a.tActual = true; continue; }
+      const [date, sc] = it.split(":"); a.traffic = a.traffic.filter((x) => x.date !== date).concat([{ date, score: +sc }]);
+    }
+    if (c.k_level) {
+      const [r, k] = c.k_level.includes(":") ? c.k_level.split(":") : ["all", c.k_level];
+      a.level = +k; a.scope = r === "all" ? "all" : "route"; $("kLevel").value = a.level; $("kLevelScope").value = a.scope;
+      $("oLevel").textContent = `×${a.level.toFixed(2).replace(".", ",")}`;
+    }
+    renderAdjInfo();
+    refresh();
+    $((act && act.scroll) || "lineChart")?.scrollIntoView({ behavior: "smooth", block: "start" });
+    addMsg("a", "Параметры применены к дашборду. Можно задать следующий вопрос или изменить параметры выше.");
   }
 
   function rerenderCharts() {

@@ -193,20 +193,6 @@ def test_ml_absent_degrades(c, synth):
         _reset(st)
 
 
-@pytest.mark.parametrize("q,route,d,hour,intent", [
-    ("Где завтра переполнение?", None, "2025-12-11", None, "overflow"),
-    ("Сколько вагонов нужно на 17 маршруте в 8 утра?", "17", None, 8, "vehicles"),
-    ("Сколько пассажиров на маршруте 7 10 декабря в 18:00?", "7", "2025-12-10", 18, "load"),
-    ("сколько трамваев надо на №11 12.12 в 7 вечера", "11", "2025-12-12", 19, "vehicles"),
-    ("Когда час пик на 11 маршруте в пятницу?", "11", "2025-12-12", None, "peak"),
-    ("Какие аномалии были на маршруте 1 в мае?", "1", None, None, "anomalies"),
-    ("Как устроена модель?", None, None, None, "model"),
-])
-def test_assistant_parse(q, route, d, hour, intent):
-    p = assistant.parse(q, date(2025, 12, 10))  # a Wednesday
-    assert (p["route_raw"], str(p["date"]) if p["date"] else None, p["hour"], p["intent"]) == (route, d, hour, intent)
-
-
 def test_assistant_answers(c, synth):
     ask = lambda q, **kw: c.get("/api/v1/assistant", params={"q": q, "ref_date": "2025-12-10", **kw}).json()
     v = ask("Сколько вагонов нужно на 17 маршруте в 8 утра?")

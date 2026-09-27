@@ -97,12 +97,26 @@ with sync_playwright() as p:
         panel(page, "#lineChart", "ai_interval_month_hybrid.png")
         panel(page, "#modelCard", "ai_model_panel.png")
         page.eval_on_selector("#asstBtn", "b => b.click()")  # the floating button is hidden for panel shots
-        for q in ("Где завтра переполнение?", "Сколько вагонов нужно на 17 маршруте в 8 утра?"):
+        for q in ("Где завтра переполнение?", "сколько вагонов на семерке завтра в вечерний час пик"):
             page.fill("#asstQ", q)
             page.press("#asstQ", "Enter")
-            page.wait_for_timeout(900)
+            page.wait_for_timeout(1200)
         page.locator("#asst").screenshot(path=str(OUT / "ai_assistant.png"))
+        # round 4: recognised parameters as editable chips
+        page.eval_on_selector_all(".qcard [data-act=edit]", "bs => bs[bs.length - 1].click()")
+        page.wait_for_timeout(300)
+        page.locator("#asst").screenshot(path=str(OUT / "r4_assistant_edit.png"))
         page.click("#asstClose")
+        page.click("#horizon button[data-h=day]")
+        # round 4: empty state with the cat (route 5 has no actuals before its launch), traffic group, header
+        page.select_option("#route", "5")
+        page.click("#horizon button[data-h=month]")
+        page.select_option("#month", "2025-10")
+        wait_ready(page)
+        panel(page, ".chart-wrap:has(#lineChart)", "r4_empty_state.png")
+        panel(page, "#trafficCol", "r4_traffic_coefficient.png")
+        panel(page, ".topbar", "r4_header.png")
+        page.select_option("#route", "all")
         page.click("#horizon button[data-h=day]")
         mob = b.new_context(viewport={"width": 390, "height": 844}, device_scale_factor=1)
         mp = mob.new_page()

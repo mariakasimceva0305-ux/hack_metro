@@ -15,3 +15,5 @@ experiments/traffic/*.html
 experiments/traffic/*.txt
 experiments/linecount.txt
 submissions/_*
+.env
+service/.env

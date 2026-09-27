@@ -11,8 +11,9 @@ from typing import Annotated, Literal
 import orjson
 from fastapi import Depends, FastAPI, Query
 from fastapi.middleware.gzip import GZipMiddleware
-from fastapi.responses import FileResponse, ORJSONResponse, Response
+from fastapi.responses import ORJSONResponse, Response
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field
 
 from . import adjust, assistant, config, errors, metrics, queries, store
 from .errors import ApiError
@@ -67,6 +68,8 @@ AdjDesc = {
     "w_floor": "Нижняя граница погодного множителя (модель: 0.9)",
     "w_scenario": "Сценарий погоды «дата:+мм[:температура]», несколько через «;», например 2025-12-10:10:-15",
     "k_event": "События «маршрут|all:с:по:множитель[:час-час]», несколько через «;», например 7:2025-12-01:2025-12-07:0",
+    "k_traffic": "Пробки ЦОДД (баллы 0–10): «ГГГГ-ММ-ДД:балл», несколько через «;», или actual — фактические посты ЦОДД за ноябрь–декабрь",
+    "w_traffic": "Эффект пробок на пассажиров трамвая на 1 балл выше нормы 3 недель (подтверждено: +0.007 = +0,7 %/балл)",
     "model": "Модель прогноза: v08 (структурная) или hybrid (структурная × поправка LightGBM, если загружен hybrid_nov_dec.csv)",
 }
 
@@ -83,8 +86,10 @@ def get_adj(k_level: str | None = Query(None, description=AdjDesc["k_level"], ex
             w_floor: float = Query(adjust.DEF_FLOOR, ge=0.3, le=1.0, description=AdjDesc["w_floor"]),
             w_scenario: str | None = Query(None, description=AdjDesc["w_scenario"]),
             k_event: str | None = Query(None, description=AdjDesc["k_event"]),
-            model: Literal["v08", "hybrid"] = Query("v08", description=AdjDesc["model"])) -> adjust.Adj:
-    return _parse_adj(k_level, k_special, w_precip, w_cold, w_floor, w_scenario, k_event, model)
+            model: Literal["v08", "hybrid"] = Query("v08", description=AdjDesc["model"]),
+            k_traffic: str | None = Query(None, description=AdjDesc["k_traffic"]),
+            w_traffic: float = Query(adjust.DEF_TRAFFIC, ge=0, le=0.05, description=AdjDesc["w_traffic"])) -> adjust.Adj:
+    return _parse_adj(k_level, k_special, w_precip, w_cold, w_floor, w_scenario, k_event, model, k_traffic, w_traffic)
 
 
 ADJ = Annotated[adjust.Adj, Depends(get_adj)]
@@ -99,7 +104,7 @@ def _cached(kind: str, *args) -> bytes:
         "series": queries.series_query, "stop": queries.stop_query, "routes": queries.routes_query,
         "stops": queries.stops_query, "map": queries.map_query, "kpi": queries.kpi_query,
         "year": queries.year_scenario, "explain": queries.explain_query, "fleet": queries.fleet_query,
-        "weather": queries.weather_query, "anomalies": queries.anomalies_query, "model": queries.model_query,
+        "weather": queries.weather_query, "traffic": queries.traffic_query, "anomalies": queries.anomalies_query, "model": queries.model_query,
         "assistant": assistant.answer,
     }[kind]
     return orjson.dumps(fn(st, *args))
@@ -172,6 +177,27 @@ def weather(adj: ADJ, date_from: str | None = DF, date_to: str | None = DT):
     return _cached_response("weather", date_from, date_to, adj)
 
 
+@app.get("/api/v1/traffic", tags=["Аналитика"], summary="Пробки ЦОДД по дням: балл 0–10, норма 3 недель, множитель")
+def traffic(adj: ADJ, date_from: str | None = DF, date_to: str | None = DT):
+    return _cached_response("traffic", date_from, date_to, adj)
+
+
+@lru_cache(maxsize=1)
+def _traffic_live() -> bytes | None:
+    p = config.DATA_DIR / "traffic_live.json"
+    return p.read_bytes() if p.is_file() else None
+
+
+@app.get("/api/v1/traffic/live", tags=["Аналитика"],
+         summary="Живой слой пробок TomTom у остановок (если scripts/fetch_traffic.py отработал с рабочим ключом)")
+def traffic_live():
+    data = _traffic_live()
+    if data is None:
+        return _json({"available": False, "message": "Живой слой TomTom не настроен: нет рабочего ключа TOMTOM_API_KEY "
+                                                     "или scripts/fetch_traffic.py ещё не запускался", "points": []})
+    return Response(data, media_type="application/json")
+
+
 @app.get("/api/v1/fleet", tags=["Аналитика"], summary="Выпуск подвижного состава: потребность в вагонах по часам")
 def fleet(adj: ADJ, route: str = RT, date: str | None = Query(None, description="ГГГГ-ММ-ДД"),
           capacity: int | None = Query(None, ge=50, le=400, description="Вместимость вагона, пасс. (по умолчанию из наряда)"),
@@ -213,6 +239,68 @@ def assistant_q(adj: ADJ, q: str = Query("", max_length=300, description="Воп
     st = store.get()
     ref = queries.parse_date(ref_date, "ref_date") or st.coverage["forecast"][0]
     return _cached_response("assistant", q.strip(), ref, adj, plan_by)
+
+
+class AssistantQuery(BaseModel):
+    """Structured query. Every field is optional: the dispatcher edits the recognised parameters and re-asks."""
+    route: str | None = Field(None, max_length=10, description="номер маршрута или all")
+    date_from: str | None = Field(None, description="ГГГГ-ММ-ДД")
+    date_to: str | None = Field(None, description="ГГГГ-ММ-ДД")
+    hour_from: int | None = Field(None, ge=0, le=23)
+    hour_to: int | None = Field(None, ge=0, le=23)
+    hour_ranges: list[list[int]] | None = Field(None, max_length=4, description="[[7, 9], [16, 19]]: 07–10 и 16–20")
+    granularity: Literal["hour", "day", "month"] | None = None
+    intent: Literal["help", "overflow", "vehicles", "load", "peak", "anomalies", "model"] | None = None
+    corrections: dict[str, str] | None = Field(None, description="k_level, k_event, w_scenario, k_traffic (формат как в API)")
+
+
+class AssistantRequest(BaseModel):
+    text: str = Field("", max_length=300, description="Вопрос диспетчера свободным текстом")
+    ref_date: str | None = Field(None, description="«Сегодня» для слов завтра/сегодня (по умолчанию — начало прогноза)")
+    plan_by: Literal["p50", "p90"] = "p50"
+    query: AssistantQuery | None = Field(None, description="Подтверждённые / исправленные параметры (вместо разбора текста)")
+
+
+def _assistant_q(st, q: dict) -> dict:
+    """Validate an edited structured query (dates, hours) with the same Russian errors as the rest of the API."""
+    for k in ("date_from", "date_to"):
+        if q.get(k):
+            q[k] = str(queries.parse_date(q[k], k))
+    if q.get("date_from") and not q.get("date_to"):
+        q["date_to"] = q["date_from"]
+    if q.get("date_from") and q["date_to"] < q["date_from"]:
+        raise ApiError(400, "invalid_period", f"Дата окончания ({q['date_to']}) раньше даты начала ({q['date_from']})")
+    rng = q.get("hour_ranges") or ([[q["hour_from"], q.get("hour_to", q["hour_from"])]] if q.get("hour_from") is not None else [])
+    for r in rng:
+        if len(r) != 2 or not (0 <= r[0] <= r[1] <= 23):
+            raise ApiError(400, "invalid_hours", "Часы: от 0 до 23, начало не позже конца")
+    q["hour_ranges"] = rng
+    if rng:
+        q["hour_from"], q["hour_to"] = min(r[0] for r in rng), max(r[1] for r in rng)
+    if q.get("corrections"):
+        c = q["corrections"]
+        adjust.parse(st, c.get("k_level"), 1.0, adjust.DEF_PRECIP, adjust.DEF_COLD, adjust.DEF_FLOOR,
+                     c.get("w_scenario"), c.get("k_event"), "v08", c.get("k_traffic"))  # validation only
+    return q
+
+
+@app.post("/api/v1/assistant/query", tags=["ИИ / ML"],
+          summary="Помощник: свободный текст → структурированный запрос (маршрут, даты, часы, коррекции) + ответ")
+def assistant_query(adj: ADJ, body: AssistantRequest):
+    st = store.get()
+    ref = queries.parse_date(body.ref_date, "ref_date") or st.coverage["forecast"][0]
+    from .nlq import parse_query
+
+    parsed = parse_query(body.text, ref, st.coverage["combined"][0].year)
+    if body.query is not None:
+        edited = body.query.model_dump(exclude_none=True)
+        if "hour_from" in edited and "hour_ranges" not in edited:
+            parsed["hour_ranges"] = []
+        parsed.update(edited)
+        parsed["chips"] = []
+        parsed.pop("date_defaulted", None)
+        parsed = _assistant_q(st, parsed)
+    return _json(assistant.answer_query(st, parsed, adj, body.plan_by))
 
 
 @lru_cache(maxsize=1)
@@ -313,9 +401,28 @@ def health_root():
 
 
 # ---------------- frontend ----------------
+@lru_cache(maxsize=4)
+def _index_html_for(_mtimes: tuple) -> bytes:
+    """index.html with versioned asset URLs, so a browser never runs a stale cached app.js against a newer page."""
+    import hashlib
+
+    h = hashlib.sha1()
+    for name in ("app.js", "style.css"):
+        h.update((config.STATIC_DIR / name).read_bytes())
+    v = h.hexdigest()[:10]
+    html = (config.STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    html = html.replace('/static/app.js"', f'/static/app.js?v={v}"').replace('/static/style.css"', f'/static/style.css?v={v}"')
+    return html.encode("utf-8")
+
+
+def _index_html() -> bytes:
+    # keyed on the files' mtimes: an edited page is never served with a mismatched cached script version
+    return _index_html_for(tuple((config.STATIC_DIR / n).stat().st_mtime_ns for n in ("index.html", "app.js", "style.css")))
+
+
 @app.get("/", include_in_schema=False)
 def index():
-    return FileResponse(config.STATIC_DIR / "index.html")
+    return Response(_index_html(), media_type="text/html; charset=utf-8", headers={"Cache-Control": "no-cache"})
 
 
 app.mount("/static", StaticFiles(directory=config.STATIC_DIR), name="static")
