@@ -47,3 +47,4 @@ Round 5 (UI redesign per docs/UI_PLAN.md, branch ui-redesign)
 - Screenshots: `ui2_*.png` (5 views + drawer + assistant, light/dark, 1440×900 and 390×844, filters sheet on mobile, rail); `scripts/screenshots.py` rewritten for views and the drawer; legacy panel shots regenerated.
 
 - Round 5 review (orchestrator): floating assistant button made compact (cat only, title tooltip) to stop overlapping the rail link. Known: test_every_view[dark-390] can time out once under full-suite load; passes 3/3 when run alone.
+- Round 5b (orchestrator, frontend-design skill review): sentence-case labels, plain-language subtitle and API link (no «A · B · C» strings), only decision surfaces raised (KPIs, map, «Внимание»), dimmed backdrop for the mobile filters sheet. 77 tests pass; screenshots regenerated.

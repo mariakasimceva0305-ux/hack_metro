@@ -17,3 +17,4 @@ experiments/linecount.txt
 submissions/_*
 .env
 service/.env
+.claude/
