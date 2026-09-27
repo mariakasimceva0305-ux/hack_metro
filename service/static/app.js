@@ -107,6 +107,7 @@
     initAdjControls();
     initAi();
     bind();
+    initShell();
     initMap();
     await refresh();
   }
@@ -357,6 +358,7 @@
       + a.events.length + a.traffic.length + (a.tActual ? 1 : 0);
     $("adjCount").textContent = n ? `активно: ${n}` : "не заданы";
     $("adjCount").classList.toggle("on", n > 0);
+    renderScenarioBadge(n);
     const q = new URLSearchParams(adjParams()).toString();
     $("adjApi").textContent = q ? `/api/v1/forecast?route=${S.route}&…&${decodeURIComponent(q)}` : "параметры не заданы (прогноз модели)";
     if (!adjActive()) $("adjDelta").innerHTML = `<span class="muted">прогноз модели без коррекции</span>`;
@@ -798,13 +800,14 @@
 
   async function loadFleet() {
     const card = $("fleetCard");
-    if (!routeHasData(S.route)) { card.classList.add("hidden"); renderOverflowKpi(null); return; }
+    if (!routeHasData(S.route)) { card.classList.add("hidden"); renderOverflowKpi(null); renderRisk(null); return; }
     card.classList.remove("hidden");
     const d = S.date;
     const val = (id) => ($(id).value === "" ? null : $(id).value);
     const r = await api("/fleet", { route: S.route, date: d, capacity: val("fCap"), load_target: val("fLoad"), peak_share: val("fShare"),
       turnover: val("fTurn"), speed: val("fSpeed"), layover: val("fLay"), max_headway: val("fHead"), plan_by: S.planP90 ? "p90" : null });
     renderOverflowKpi(r);
+    renderRisk(r);
     $("fleetDate").textContent = human(d);
     $("fleetBadge").textContent = `${r.source === "history" ? "по факту" : r.adjusted ? "по прогнозу с коррекцией" : "по прогнозу"} · ${short(d)}`;
     const one = r.routes.length === 1 ? r.routes[0] : null;
@@ -962,7 +965,7 @@
       S.stop = null; S.horizon = "month";
       [...$("horizon").children].forEach((x) => x.classList.toggle("on", x.dataset.h === "month"));
       refresh();
-      $("lineChart").scrollIntoView({ behavior: "smooth", block: "center" });
+      reveal("lineChart");
     }));
   }
 
@@ -1109,8 +1112,141 @@
     }
     renderAdjInfo();
     refresh();
-    $((act && act.scroll) || "lineChart")?.scrollIntoView({ behavior: "smooth", block: "start" });
-    addMsg("a", "Параметры применены к дашборду. Можно задать следующий вопрос или изменить параметры выше.");
+    go("overview");
+    addMsg("a", "Параметры применены: открыт «Обзор». Можно задать следующий вопрос или изменить параметры выше.");
+  }
+
+  // ---------------- app shell (Round 5): views with hash routing, «Сценарий» drawer, filters sheet ----------------
+  const VIEWS = ["overview", "fleet", "analytics", "anomalies", "model"];
+  const VIEW_TITLE = { overview: "Обзор", fleet: "Выпуск", analytics: "Аналитика", anomalies: "ИИ-аномалии", model: "Модель" };
+  const reducedMotion = () => matchMedia("(prefers-reduced-motion: reduce)").matches;
+  function go(view, { push = true, focus = false } = {}) {
+    if (!VIEWS.includes(view)) view = "overview";
+    const prev = S.view;
+    S.view = view;
+    for (const v of VIEWS) {
+      const on = v === view, p = $(`view-${v}`), t = $(`tab-${v}`);
+      p.hidden = !on; p.classList.toggle("active", on);
+      t.setAttribute("aria-selected", String(on)); t.tabIndex = on ? 0 : -1;
+    }
+    // the day/month/year chart is shared: «Обзор» (hourly curve) and «Аналитика» (horizon chart)
+    if (view === "overview" || view === "analytics") {
+      const card = $("lineChart").closest("section.card"), slot = $(`slot-line-${view}`);
+      if (card.parentElement !== slot) slot.appendChild(card);
+    }
+    if (push && location.hash !== `#${view}`) history.pushState(null, "", `#${view}`);
+    document.title = `${VIEW_TITLE[view]} · Трамвай: прогноз загрузки`;
+    // charts / map drawn while their view was hidden get their real size now (ResizeObserver also covers this)
+    requestAnimationFrame(() => {
+      Object.values(charts).forEach((c) => c && !c.isDisposed() && c.resize());
+      if (S.map) S.map.invalidateSize();
+    });
+    if (prev && prev !== view) window.scrollTo({ top: 0, behavior: reducedMotion() ? "auto" : "smooth" });
+    if (focus) $(`view-${view}`).focus({ preventScroll: true });
+  }
+  /** Switch to the view that contains an element, then scroll to it. */
+  function reveal(id, block = "center") {
+    const v = $(id)?.closest(".view");
+    if (v) go(v.id.replace("view-", ""));
+    requestAnimationFrame(() => $(id)?.scrollIntoView({ behavior: reducedMotion() ? "auto" : "smooth", block }));
+  }
+  const focusables = (root) => [...root.querySelectorAll('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])')]
+    .filter((el) => !el.disabled && el.offsetParent !== null);
+  function openDrawer(open) {
+    const d = $("drawer"), b = $("drawerBackdrop");
+    $("scnBtn").setAttribute("aria-expanded", String(open));
+    if (open) {
+      S.drawerReturn = document.activeElement;
+      d.hidden = false; b.hidden = false;
+      $("adjCard").classList.remove("collapsed");
+      requestAnimationFrame(() => { d.classList.add("open"); b.classList.add("open"); });
+      setTimeout(() => (focusables(d).find((x) => x.id !== "drawerClose") || d).focus(), 30);
+      document.body.classList.add("drawer-open");
+    } else {
+      d.classList.remove("open"); b.classList.remove("open");
+      document.body.classList.remove("drawer-open");
+      setTimeout(() => { if (!d.classList.contains("open")) { d.hidden = true; b.hidden = true; } }, reducedMotion() ? 0 : 220);
+      S.drawerReturn?.focus?.();
+    }
+  }
+  function openFilters(open) {
+    document.body.classList.toggle("filters-open", open);
+    $("filtBtn").setAttribute("aria-expanded", String(open));
+    if (open) setTimeout(() => focusables($("filters"))[1]?.focus(), 30);
+    else $("filtBtn").focus();
+  }
+  function initShell() {
+    const nav = $("viewnav");
+    nav.addEventListener("click", (e) => { const b = e.target.closest("[data-view]"); if (b) go(b.dataset.view); });
+    nav.addEventListener("keydown", (e) => {  // roving tabindex: ← → ↑ ↓ Home End
+      const i = VIEWS.indexOf(S.view);
+      const j = { ArrowRight: i + 1, ArrowDown: i + 1, ArrowLeft: i - 1, ArrowUp: i - 1, Home: 0, End: VIEWS.length - 1 }[e.key];
+      if (j === undefined) return;
+      e.preventDefault();
+      const v = VIEWS[(j + VIEWS.length) % VIEWS.length];
+      go(v); $(`tab-${v}`).focus();
+    });
+    document.addEventListener("click", (e) => { const g = e.target.closest("[data-goto]"); if (g) go(g.dataset.goto); });
+    window.addEventListener("popstate", () => go(location.hash.slice(1), { push: false }));
+    $("scnBtn").onclick = () => openDrawer($("drawer").hidden);
+    $("drawerClose").onclick = () => openDrawer(false);
+    $("drawerBackdrop").onclick = () => openDrawer(false);
+    $("filtBtn").onclick = () => openFilters(!document.body.classList.contains("filters-open"));
+    $("filtClose").onclick = () => openFilters(false);
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") {
+        if (!$("drawer").hidden) { openDrawer(false); e.preventDefault(); return; }
+        if (!$("asst").classList.contains("hidden")) { $("asstClose").click(); $("asstBtn").focus(); e.preventDefault(); return; }
+        if (document.body.classList.contains("filters-open")) { openFilters(false); e.preventDefault(); }
+      }
+      if (e.key === "Tab" && !$("drawer").hidden) {  // focus trap inside the drawer
+        const f = focusables($("drawer"));
+        if (!f.length) return;
+        if (e.shiftKey && document.activeElement === f[0]) { f[f.length - 1].focus(); e.preventDefault(); }
+        else if (!e.shiftKey && document.activeElement === f[f.length - 1]) { f[0].focus(); e.preventDefault(); }
+      }
+    });
+    // the sidebar / top tabs stick right under the sticky filter bar, whatever its wrapped height
+    const setFH = () => document.documentElement.style.setProperty("--filters-h", `${$("filters").offsetHeight || 0}px`);
+    if (window.ResizeObserver) new ResizeObserver(setFH).observe($("filters")); else setFH();
+    go(location.hash.slice(1) || "overview", { push: false });
+  }
+  /** Header badge «Сценарий: N» mirrors the corrections counter; the button tooltip shows «было → стало». */
+  function renderScenarioBadge(n) {
+    const b = $("scnBadge");
+    b.textContent = n; b.hidden = !n;
+    $("scnBtn").classList.toggle("active", n > 0);
+    $("scnBtn").setAttribute("aria-label", n ? `Сценарий: ${n} активн.` : "Сценарий: корректировки не заданы");
+    $("scnBtn").title = n ? `Сценарий: ${n} активн. — ${$("adjDelta").textContent.trim()}` : "Корректирующие коэффициенты: что будет, если…";
+  }
+  /** Rail «Внимание»: the hours with the highest P(overflow) for the selected date, from the /fleet response. */
+  function renderRisk(r) {
+    const list = $("riskList");
+    if (!r) { list.innerHTML = `<li class="empty">Нет данных о пассажиропотоке для маршрута</li>`; return; }
+    $("riskSub").textContent = `${human(r.date)} · ${r.overflow?.available ? "вероятность переполнения по часам" : "рекомендации по выпуску"}`;
+    let items = [];
+    if (r.overflow?.available) {
+      for (const fr of r.routes) for (const x of fr.hours)
+        if (x.p_overflow !== null && x.p_overflow !== undefined && x.boardings) items.push({ route: fr.route, hour: x.hour, p: x.p_overflow, x });
+      items.sort((a, b) => b.p - a.p);
+      items = items.slice(0, 6);
+    }
+    if (!items.length) {
+      const recs = r.recommendations.filter((x) => x.type === "risk").slice(0, 6);
+      list.innerHTML = recs.length ? recs.map((x) => `<li class="risk-item watch"><span class="rk-t">${esc(x.text)}</span></li>`).join("")
+        : `<li class="empty">Рисков переполнения на ${short(r.date)} не видно 👌</li>`;
+      return;
+    }
+    const lvl = (p) => (p >= 0.5 ? "risk" : p >= 0.2 ? "watch" : "low");  // green stays reserved for spare capacity
+    list.innerHTML = items.map((it) => `<li><button class="risk-item ${lvl(it.p)}" data-r="${esc(it.route)}" data-h="${it.hour}">
+      <span class="rk-p">${Math.round(it.p * 100)}<small>%</small></span>
+      <span class="rk-t"><b>№ ${esc(it.route)} · ${pad(it.hour)}:00–${pad((it.hour + 1) % 24)}:00</b>
+      <small>${fmt(it.x.boardings)} пасс./ч · нужно ${it.x.required}${it.x.plan ? `, сейчас ≈ ${it.x.plan}` : ""} ваг.</small></span></button></li>`).join("");
+    [...list.querySelectorAll("button.risk-item")].forEach((b) => (b.onclick = () => {
+      S.hour = +b.dataset.h; $("hour").value = S.hour;
+      if (S.route !== b.dataset.r && S.routes.some((x) => x.route === b.dataset.r)) { S.route = b.dataset.r; $("route").value = S.route; S.stop = null; refresh(); }
+      else paintHour();
+    }));
   }
 
   function rerenderCharts() {

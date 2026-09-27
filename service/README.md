@@ -9,7 +9,7 @@ Stack: FastAPI with in-memory numpy cubes, plus one static page (Leaflet + EChar
 - **AI/ML layer** (section «ИИ/ML-компоненты» below): 80 % prediction intervals and overflow probability, P90 fleet planning, an AI anomaly detector over the history, the «Модель» panel with fold metrics and a v08 ↔ hybrid toggle, and a rule-based «Помощник диспетчера».
 - Data: actuals Jan–Oct 2025 (`labels_day_*`); forecast Nov–Dec 2025 `submissions/final_candidate.csv` (v08, public LB 0.90167) with its decomposition `final_candidate_explain.csv` (`base × special_mult × weather_mult × rules_mult`); daily Moscow weather `research/weather_moscow_2025.csv`
 
-![dashboard with corrections](docs/screenshots/corrections_route17.png)
+![Обзор: KPI, карта, «Внимание» — часы с наибольшей вероятностью переполнения](docs/screenshots/ui2_overview_light_desktop.png)
 
 ## Run
 
@@ -36,7 +36,7 @@ uvicorn app.main:app --port 8000 --workers 2
 | `TOMTOM_API_KEY` | — (read from the environment or the gitignored `service/.env`) | used **only** by `scripts/fetch_traffic.py` (live TomTom layer). The service itself never reads the key |
 | `TRACKED_ROUTES` | `1,5,7,11,12,17,25,26,28,50` | the 10 target routes. Directory-only routes (2, 3, 4, 6, 10) are hidden everywhere |
 
-Tests: `pip install -r requirements-dev.txt && pytest -q` → **67 passed** (3 of them are browser tests in `tests/test_ui_e2e.py`, skipped automatically when Playwright or Chrome is not installed; `tests/test_assistant.py` covers the query normaliser, POST `/assistant/query`, the ЦОДД coefficient and the TomTom script). They cover valid requests, corrections, rolling stock, the year scenario, export, and 4xx errors with Russian messages. `tests/test_ml.py` (9 tests) checks the AI/ML layer on small synthetic fixtures (intervals, hybrid, anomalies, report), so it does not depend on the real ML files. It also checks that every feature degrades cleanly when the files are absent.
+Tests: `pip install -r requirements-dev.txt && pytest -q` → **77 passed** (13 of them are browser tests in `tests/test_ui_e2e.py`: every view × light/dark × 1440/390 px, S1 on the first screen, the «Сценарий» drawer, assistant «Применить», chips height; they are skipped automatically when Playwright or Chrome is not installed; `tests/test_assistant.py` covers the query normaliser, POST `/assistant/query`, the ЦОДД coefficient and the TomTom script). They cover valid requests, corrections, rolling stock, the year scenario, export, and 4xx errors with Russian messages. `tests/test_ml.py` (9 tests) checks the AI/ML layer on small synthetic fixtures (intervals, hybrid, anomalies, report), so it does not depend on the real ML files. It also checks that every feature degrades cleanly when the files are absent.
 
 ## Docker (instructions for the jury)
 
@@ -142,6 +142,41 @@ curl "localhost:8000/api/v1/forecast?hour_from=abc"
 
 ## Dashboard
 
+### Layout (Round 5, `docs/UI_PLAN.md`)
+
+App shell = header (brand, «Сценарий» button with a badge of active corrections, theme, assistant cat) + global filters (route, horizon, date, model, hours, export) + **5 views** with hash routing (no reload, back button works) + the floating «Помощник диспетчера».
+
+| View (`#hash`) | What is there | Scenario |
+|---|---|---|
+| **Обзор** `#overview` | KPI row · map (2/3) + rail **«Внимание»**: the 6 hours with the highest P(overflow) for the date (click → route + hour) and the top stops · hourly chart with the 80 % band | duty dispatcher: «где и когда будет тесно» on the first screen |
+| **Выпуск** `#fleet` | trams needed per hour vs current supply, recommendations, «Планировать по P90» | fleet planner |
+| **Аналитика** `#analytics` | day / month / year chart, heatmap, route table (export stays in the filters) | analyst |
+| **ИИ-аномалии** `#anomalies` | detector list; a click opens the month in «Аналитика» with the anomaly dots | analyst, jury |
+| **Модель** `#model` | how it works, fold metrics, sources with links, factors, data quality | jury |
+| **Сценарий** (drawer) | the correction coefficients from any view; «было → стало», per-group reset, «Сбросить всё» | what-if |
+
+- Responsive: ≥ 1200 px left sidebar; 768–1199 px top tabs (rail under the map); < 768 px bottom tab bar (5 icons), filters in a «Фильтры» sheet, drawer and assistant full-screen. No horizontal scroll at 375–1440 px.
+- Visual hierarchy: view title 20 px + one-line purpose; card titles 16 px with an icon and a subtitle; status colours: red = overflow risk, amber = watch, green = spare capacity, blue = forecast, grey = actual.
+- Motion: 180 ms fade/slide between views, 200 ms drawer slide; everything off under `prefers-reduced-motion`.
+- Accessibility: real `role="tab"` buttons with roving tabindex (← → Home End), `role="tabpanel"`, a skip link, visible focus rings. The drawer is a modal dialog: it traps focus, closes on Esc and backdrop click, and returns focus. Esc also closes the assistant and the filters sheet.
+- Charts are resized and the map invalidated on every view switch (plus the per-chart ResizeObserver from Round 4).
+
+| | Light | Dark |
+|---|---|---|
+| Обзор, desktop | ![](docs/screenshots/ui2_overview_light_desktop.png) | ![](docs/screenshots/ui2_overview_dark_desktop.png) |
+| Выпуск | ![](docs/screenshots/ui2_fleet_light_desktop.png) | ![](docs/screenshots/ui2_fleet_dark_desktop.png) |
+| Аналитика | ![](docs/screenshots/ui2_analytics_light_desktop.png) | ![](docs/screenshots/ui2_analytics_dark_desktop.png) |
+| ИИ-аномалии | ![](docs/screenshots/ui2_anomalies_light_desktop.png) | ![](docs/screenshots/ui2_anomalies_dark_desktop.png) |
+| Модель | ![](docs/screenshots/ui2_model_light_desktop.png) | ![](docs/screenshots/ui2_model_dark_desktop.png) |
+| Сценарий (drawer) | ![](docs/screenshots/ui2_drawer_light_desktop.png) | ![](docs/screenshots/ui2_drawer_dark_desktop.png) |
+| Обзор, 390 px | ![](docs/screenshots/ui2_overview_light_mobile.png) | ![](docs/screenshots/ui2_overview_dark_mobile.png) |
+| Фильтры (sheet), 390 px | ![](docs/screenshots/ui2_filters_light_mobile.png) | ![](docs/screenshots/ui2_filters_dark_mobile.png) |
+| Помощник, 390 px | ![](docs/screenshots/ui2_assistant_light_mobile.png) | ![](docs/screenshots/ui2_assistant_dark_mobile.png) |
+
+All `ui2_<view>_<light|dark>_<desktop|mobile>.png` (5 views + drawer + assistant, both themes, 1440×900 and 390×844) are in `docs/screenshots/`.
+
+### Components
+
 - **Filters** (sticky): route (the 10 target routes or all), horizon **День / Месяц / Год**, date / month, hours, CSV/XLSX export of exactly what is on screen, corrections included.
 - **KPIs**: «Пиковый час», «Макс. загрузка за час», passengers for the period (with «было → стало» when corrections are on; in year view, the 2026 scenario total with its band), «Изменение к прошлому месяцу».
 - **«Корректирующие коэффициенты»** (collapsible): a level/season slider (all routes or the selected one), a special-days slider, weather coefficients plus a per-date what-if (+mm, t °C), and an events editor (route, dates, hours, presets «Перекрытие ×0», «Частичное ×0,5», «Фестиваль ×1,2»). The header shows **было → стало** for the selected period. The equivalent API query string is shown below the panel. Weather for the date: model multiplier → corrected multiplier.
@@ -159,7 +194,7 @@ curl "localhost:8000/api/v1/forecast?hour_from=abc"
   ![month](docs/screenshots/panel_month.png) ![year](docs/screenshots/panel_year.png)
 - Heatmap day × hour, top-10 stops, «Качество данных» (62.4M → 59.7M, 28 s, 100 % match), «Из чего складывается прогноз» (Russian names of the explain factors plus the model note), route table, light/dark theme, mobile layout (390 px, no horizontal scroll).
 
-All screenshots are in `docs/screenshots/`. To regenerate them: `python scripts/screenshots.py http://localhost:8000`.
+All screenshots are in `docs/screenshots/`. To regenerate them: `python scripts/screenshots.py http://localhost:8000` (it switches views and opens the drawer by itself).
 
 ### Method notes
 
@@ -293,7 +328,7 @@ service/
   data/     bundle: history, forecast (v08), explain, stops, weather_daily, fleet, pipeline report, meta,
             ML layer: intervals.csv, anomalies.csv, hybrid_nov_dec.csv, hybrid_folds.csv, model_report.md
   scripts/  fetch_traffic.py (TomTom live layer), prepare_data.py, loadtest.py, bench_docker.ps1, bench_windows.ps1, screenshots.py
-  tests/    pytest API tests (32), AI/ML layer on synthetic fixtures (9), assistant + traffic (23), browser e2e (3)
+  tests/    pytest API tests (32), AI/ML layer on synthetic fixtures (9), assistant + traffic (23), browser e2e (13)
   docs/     screenshots, raw load-test JSON
 ```
 
