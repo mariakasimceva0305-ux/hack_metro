@@ -1,0 +1,20 @@
+# raw data (10+ GB) — download dataset.zip from the organizers
+*.zip
+train.csv
+test.csv
+experiments/raw.parquet
+experiments/hourly_boardings.csv
+experiments/**/*.parquet
+research/*.pdf
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+service/.venv/
+experiments/traffic/*.html
+experiments/traffic/*.txt
+experiments/linecount.txt
+submissions/_*
+.env
+service/.env
+.claude/
