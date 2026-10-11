@@ -1,0 +1,33 @@
+{
+  "rows": 14640,
+  "unique_keys": true,
+  "nonnegative_finite": true,
+  "future_tail_override": false,
+  "backtests": [
+    {
+      "start": "2025-10-01",
+      "end": "2025-10-31",
+      "n": 7440,
+      "wape_score": 0.904422306570771
+    },
+    {
+      "start": "2025-09-15",
+      "end": "2025-10-31",
+      "n": 11280,
+      "wape_score": 0.8955265857861706
+    },
+    {
+      "start": "2025-02-01",
+      "end": "2025-03-31",
+      "n": 14160,
+      "wape_score": 0.9047570236957457
+    },
+    {
+      "start": "2025-04-01",
+      "end": "2025-05-31",
+      "n": 14640,
+      "wape_score": 0.8469572346431304
+    }
+  ],
+  "interpretation": "Retrospective reproduction of existing configuration; periods were historically used for development, not a fresh untouched test."
+}

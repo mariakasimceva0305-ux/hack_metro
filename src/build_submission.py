@@ -37,13 +37,6 @@ if __name__ == '__main__':
         print(s, round(wape_score(fut.boardings.values, predict(hist, fut).prediction.values), 4))
     sub = predict(d, full_grid('2025-11-01', '2025-12-31'))
     sub.loc[sub.route == 5, ['base','prediction']] = 0
-    import os
-    leak = pd.read_csv('experiments/leak_nov01.csv', sep=';') if os.path.exists('experiments/leak_nov01.csv') else pd.DataFrame(columns=['route','h','n'])
-    for r in leak.itertuples():  # exact known values for 2025-11-01 00:00–01:59 (raw data tail)
-        m = (sub.route == r.route) & (sub.date == '2025-11-01') & (sub.hour == r.h)
-        sub.loc[m, 'prediction'] = r.n
-    m = (len(leak) > 0) & (sub.date == '2025-11-01') & (sub.hour <= 1) & ~sub.set_index(['route','hour']).index.isin(list(zip(leak.route, leak.h)))
-    sub.loc[m, 'prediction'] = 0
     sub['date'] = sub.date.dt.strftime('%Y-%m-%d'); sub['prediction'] = sub.prediction.round().astype(int)
     sub[['route','date','hour','prediction']].to_csv(f'submissions/{a.name}.csv', sep=';', index=False)
     sub.to_csv(f'submissions/{a.name}_explain.csv', sep=';', index=False)

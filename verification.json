@@ -1,0 +1,15 @@
+{
+  "verified_on": "2026-10-11",
+  "checks": [
+    {
+      "project": "hack_metro/service",
+      "command": "-m pytest -q",
+      "exit_code": 0
+    },
+    {
+      "project": "hack_metro",
+      "command": "src/make_final.py --no-weather --name verified_20261011",
+      "exit_code": 0
+    }
+  ]
+}
